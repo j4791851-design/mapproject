@@ -18,6 +18,44 @@ const distMeters = (aLng: number, aLat: number, bLng: number, bLat: number) => {
   return 2 * R * Math.asin(Math.sqrt(s))
 }
 
+// Compass bearing (deg) from point a to point b
+const bearingDeg = (aLng: number, aLat: number, bLng: number, bLat: number) => {
+  const p1 = (aLat * Math.PI) / 180
+  const p2 = (bLat * Math.PI) / 180
+  const dl = ((bLng - aLng) * Math.PI) / 180
+  const y = Math.sin(dl) * Math.cos(p2)
+  const x = Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl)
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360
+}
+const compass = (b: number) => ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(b / 45) % 8]
+
+// ICAO type designators that are helicopters (category A7 catches most, this is a fallback)
+const HELI_TYPES = new Set([
+  'R22', 'R44', 'R66', 'B06', 'B06T', 'B407', 'B412', 'B427', 'B429', 'B430', 'B505', 'B47G', 'B47T',
+  'UH1', 'UH60', 'H60', 'H64', 'H47', 'H53', 'H53S', 'H65', 'H72', 'H160', 'H155', 'HUCO',
+  'EC20', 'EC25', 'EC30', 'EC35', 'EC45', 'EC55', 'EC75', 'AS32', 'AS3B', 'AS50', 'AS55', 'AS65',
+  'A109', 'A119', 'A139', 'A149', 'A169', 'A189', 'S61', 'S76', 'S92', 'SK76',
+  'MD50', 'MD52', 'MD60', 'EXPL', 'GAZL', 'LAMA', 'ALOU', 'EN28', 'EN48', 'F28', 'F28F',
+  'H269', 'H500', 'KMAX', 'MI8', 'MI24', 'MI38', 'KA26', 'KA32', 'KA52', 'NH90', 'TIGR', 'PUMA', 'LYNX', 'W3',
+])
+
+const HELI_NAMES: Record<string, string> = {
+  R22: 'Robinson R22', R44: 'Robinson R44', R66: 'Robinson R66',
+  B06: 'Bell 206 JetRanger', B407: 'Bell 407', B412: 'Bell 412', B427: 'Bell 427', B429: 'Bell 429', B505: 'Bell 505',
+  UH1: 'Bell UH-1 Huey', H60: 'Sikorsky UH-60 Black Hawk', UH60: 'Sikorsky UH-60 Black Hawk',
+  H64: 'Boeing AH-64 Apache', H47: 'Boeing CH-47 Chinook', H53S: 'Sikorsky CH-53E Super Stallion', H53: 'Sikorsky CH-53',
+  H65: 'Airbus MH-65 Dolphin', H72: 'Airbus UH-72 Lakota', H160: 'Airbus H160', H155: 'Airbus H155',
+  EC20: 'Eurocopter EC120', EC30: 'Eurocopter EC130', EC35: 'Airbus H135', EC45: 'Airbus H145', EC55: 'Eurocopter EC155',
+  AS32: 'AS332 Super Puma', AS3B: 'AS332 Super Puma', AS50: 'Airbus H125 / AS350 AStar', AS55: 'AS355 TwinStar', AS65: 'AS365 Dauphin',
+  A109: 'AgustaWestland AW109', A119: 'AgustaWestland AW119', A139: 'Leonardo AW139', A149: 'Leonardo AW149',
+  A169: 'Leonardo AW169', A189: 'Leonardo AW189',
+  S61: 'Sikorsky S-61', S76: 'Sikorsky S-76', S92: 'Sikorsky S-92',
+  MD52: 'MD 520N NOTAR', MD60: 'MD 600N', EXPL: 'MD 900 Explorer',
+  GAZL: 'Aérospatiale Gazelle', LAMA: 'Aérospatiale Lama', ALOU: 'Aérospatiale Alouette',
+  H269: 'Schweizer 269', H500: 'MD 500', MI8: 'Mil Mi-8', MI24: 'Mil Mi-24 Hind', KA32: 'Kamov Ka-32',
+  NH90: 'NHIndustries NH90', TIGR: 'Eurocopter Tiger', PUMA: 'SA330 Puma', LYNX: 'Westland Lynx',
+}
+
 export default function GPSMap() {
   const [viewState, setViewState] = useState({
     longitude: -122.4194,
@@ -50,11 +88,16 @@ export default function GPSMap() {
   const announcedRef = useRef(-1)
   const stepsRef = useRef<any[]>([])
   const justSelectedRef = useRef(false)
+  const [helisOn, setHelisOn] = useState(false)
+  const [helis, setHelis] = useState<any[]>([])
+  const [selHeli, setSelHeli] = useState<any>(null)
+  const locRef = useRef(userLocation)
 
   // Keep refs in sync so geolocation callback can read latest values
   followRef.current = follow
   voiceRef.current = voiceOn
   stepsRef.current = directions
+  locRef.current = userLocation
 
   // Speak a navigation instruction
   const speak = (text: string) => {
@@ -156,6 +199,68 @@ export default function GPSMap() {
       .then((d) => d && setSavedRoutes(d.routes || []))
       .catch(() => {})
   }, [])
+
+  // Live helicopter tracking via airplanes.live ADS-B (free, no key, includes military/police).
+  // Point endpoint caps at 250nm (~463km); the /mil feed covers military anywhere, filtered to 1000km.
+  useEffect(() => {
+    if (!helisOn) {
+      setHelis([])
+      setSelHeli(null)
+      return
+    }
+    let alive = true
+    const load = async () => {
+      const loc = locRef.current ?? (() => {
+        const c = mapRef.current?.getMap()?.getCenter()
+        return c ? { longitude: c.lng, latitude: c.lat } : null
+      })()
+      if (!loc) return
+      const [point, mil] = await Promise.all([
+        fetch(`https://api.airplanes.live/v2/point/${loc.latitude.toFixed(4)}/${loc.longitude.toFixed(4)}/250`)
+          .then((r) => r.json()).catch(() => null),
+        fetch('https://api.airplanes.live/v2/mil').then((r) => r.json()).catch(() => null),
+      ])
+      const seen = new Set<string>()
+      const out: any[] = []
+      const push = (a: any, isMil: boolean) => {
+        if (!a?.hex || a.lat == null || a.lon == null || seen.has(a.hex)) return
+        const t = (a.t || '').toUpperCase().trim()
+        if (a.category !== 'A7' && !HELI_TYPES.has(t)) return
+        const dKm = distMeters(loc.longitude, loc.latitude, a.lon, a.lat) / 1000
+        if (dKm > 1000) return
+        seen.add(a.hex)
+        out.push({
+          hex: a.hex,
+          callsign: (a.flight || '').trim(),
+          reg: a.r || '',
+          type: t,
+          name: HELI_NAMES[t] || (t ? `Type ${t}` : 'Helicopter'),
+          lat: a.lat,
+          lon: a.lon,
+          alt: a.alt_baro === 'ground' ? 0 : a.alt_baro ?? null,
+          gs: a.gs ?? null,
+          track: a.track ?? null,
+          squawk: a.squawk || '',
+          emergency: a.emergency && a.emergency !== 'none' ? a.emergency : '',
+          mil: isMil || !!(a.dbFlags & 1),
+          distKm: dKm,
+        })
+      }
+      point?.ac?.forEach((a: any) => push(a, false))
+      mil?.ac?.forEach((a: any) => push(a, true))
+      if (!alive) return
+      out.sort((a, b) => a.distKm - b.distKm)
+      setHelis(out)
+      setSelHeli((s: any) => (s ? out.find((h) => h.hex === s.hex) ?? s : s))
+    }
+    load()
+    const iv = setInterval(load, 20000)
+    return () => {
+      alive = false
+      clearInterval(iv)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- location read via ref so GPS ticks don't retrigger fetches
+  }, [helisOn])
 
   const saveCurrentRoute = async (name: string) => {
     if (!destination) return
@@ -637,6 +742,23 @@ export default function GPSMap() {
             </button>
           </Marker>
         ))}
+
+        {/* Live helicopters - rotated by heading, green ring = military */}
+        {helisOn && helis.map((h) => (
+          <Marker key={h.hex} longitude={h.lon} latitude={h.lat} anchor="center">
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                setSelHeli(h)
+              }}
+              className={`w-8 h-8 rounded-full flex items-center justify-center text-base shadow-md bg-white border-2 ${selHeli?.hex === h.hex ? 'border-blue-600 scale-125' : h.mil ? 'border-green-600' : 'border-gray-400'} ${h.emergency ? 'border-red-600' : ''}`}
+              style={{ transform: `rotate(${(h.track ?? 0) - 270}deg)` }}
+              title={h.name}
+            >
+              🚁
+            </button>
+          </Marker>
+        ))}
       </Map>
 
       {/* Floating pill search bar */}
@@ -726,6 +848,12 @@ export default function GPSMap() {
             </svg>
             Saved ({savedRoutes.length})
           </button>
+          <button
+            onClick={() => setHelisOn(!helisOn)}
+            className={`px-3 py-1.5 rounded-full text-xs font-medium shadow transition-colors ${helisOn ? 'bg-blue-600 text-white' : 'bg-white text-gray-700'}`}
+          >
+            🚁 Helis{helisOn ? ` (${helis.length})` : ''}
+          </button>
         </div>
 
         {/* Saved routes dropdown */}
@@ -758,6 +886,71 @@ export default function GPSMap() {
                 </div>
               ))
             )}
+          </div>
+        )}
+
+        {/* Active helicopters list */}
+        {helisOn && (
+          <div className="mt-2 bg-white rounded-2xl shadow-lg max-h-56 overflow-y-auto">
+            {helis.length === 0 ? (
+              <div className="px-4 py-4 text-sm text-gray-500">No helicopters broadcasting nearby right now.</div>
+            ) : (
+              helis.map((h) => (
+                <button
+                  key={h.hex}
+                  onClick={() => {
+                    setSelHeli(h)
+                    mapRef.current?.getMap()?.flyTo({ center: [h.lon, h.lat], zoom: Math.max(viewState.zoom, 11) })
+                  }}
+                  className="w-full text-left px-4 py-2.5 hover:bg-gray-100 flex items-center gap-3 border-t border-gray-100 first:border-t-0"
+                >
+                  <span className="text-lg shrink-0">🚁</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-medium text-black truncate">
+                      {h.name}
+                      {h.mil && <span className="ml-1.5 text-[10px] font-semibold bg-green-100 text-green-700 px-1.5 py-0.5 rounded-full align-middle">MIL</span>}
+                      {h.emergency && <span className="ml-1.5 text-[10px] font-semibold bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full align-middle">SOS</span>}
+                    </div>
+                    <div className="text-xs text-gray-500 truncate">
+                      {h.callsign || h.reg || h.hex} · {h.distKm < 10 ? `${h.distKm.toFixed(1)} km` : `${Math.round(h.distKm)} km`} away
+                    </div>
+                  </div>
+                </button>
+              ))
+            )}
+          </div>
+        )}
+
+        {/* Selected helicopter detail card */}
+        {helisOn && selHeli && (
+          <div className="mt-2 bg-white rounded-2xl shadow-lg px-4 py-3">
+            <div className="flex items-start justify-between">
+              <div className="min-w-0">
+                <div className="text-sm font-bold text-black truncate">{selHeli.name}</div>
+                <div className="text-xs text-gray-500">
+                  {selHeli.mil ? 'Military' : 'Civil'} helicopter{selHeli.type ? ` · ${selHeli.type}` : ''}
+                  {selHeli.emergency ? ` · ⚠ ${selHeli.emergency}` : ''}
+                </div>
+              </div>
+              <button onClick={() => setSelHeli(null)} className="text-gray-400 hover:text-gray-600 p-1 -mr-1">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <path d="M6 6l12 12M18 6L6 18" strokeLinecap="round" />
+                </svg>
+              </button>
+            </div>
+            <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-black">
+              <div><span className="text-gray-500">Callsign</span> {selHeli.callsign || '—'}</div>
+              <div><span className="text-gray-500">Reg</span> {selHeli.reg || '—'}</div>
+              <div><span className="text-gray-500">Altitude</span> {selHeli.alt != null ? `${Math.round(selHeli.alt).toLocaleString()} ft` : '—'}</div>
+              <div><span className="text-gray-500">Speed</span> {selHeli.gs != null ? `${Math.round(selHeli.gs)} kts` : '—'}</div>
+              <div><span className="text-gray-500">Heading</span> {selHeli.track != null ? `${Math.round(selHeli.track)}° ${compass(selHeli.track)}` : '—'}</div>
+              <div><span className="text-gray-500">Squawk</span> {selHeli.squawk || '—'}</div>
+              {userLocation && (
+                <div className="col-span-2">
+                  <span className="text-gray-500">Position</span> {selHeli.distKm.toFixed(1)} km {compass(bearingDeg(userLocation.longitude, userLocation.latitude, selHeli.lon, selHeli.lat))} of you
+                </div>
+              )}
+            </div>
           </div>
         )}
 
