@@ -115,6 +115,7 @@ export default function GPSMap() {
       <div style="position:absolute;left:-14px;top:-14px;width:28px;height:28px;border-radius:50%;background:rgba(66,133,244,0.25);animation:gpsPulse 2s ease-out infinite"></div>
       <div style="position:absolute;left:-8px;top:-8px;width:16px;height:16px;border-radius:50%;background:#4285f4;border:2.5px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.4)"></div>`
     const mk = new mapboxgl.Marker({ element: el, anchor: 'center' })
+    mk.setLngLat([0, 0]).addTo(map)
     userMarkerRef.current = mk
     return mk
   }
