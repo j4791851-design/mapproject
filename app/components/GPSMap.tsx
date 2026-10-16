@@ -88,7 +88,7 @@ export default function GPSMap() {
   const announcedRef = useRef(-1)
   const stepsRef = useRef<any[]>([])
   const justSelectedRef = useRef(false)
-  const [helisOn, setHelisOn] = useState(false)
+  const [showHeliList, setShowHeliList] = useState(false)
   const [helis, setHelis] = useState<any[]>([])
   const [selHeli, setSelHeli] = useState<any>(null)
   const locRef = useRef(userLocation)
@@ -203,11 +203,6 @@ export default function GPSMap() {
   // Live helicopter tracking via airplanes.live ADS-B (free, no key, includes military/police).
   // Point endpoint caps at 250nm (~463km); the /mil feed covers military anywhere, filtered to 1000km.
   useEffect(() => {
-    if (!helisOn) {
-      setHelis([])
-      setSelHeli(null)
-      return
-    }
     let alive = true
     const load = async () => {
       const loc = locRef.current ?? (() => {
@@ -260,7 +255,7 @@ export default function GPSMap() {
       clearInterval(iv)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- location read via ref so GPS ticks don't retrigger fetches
-  }, [helisOn])
+  }, [])
 
   const saveCurrentRoute = async (name: string) => {
     if (!destination) return
@@ -744,7 +739,7 @@ export default function GPSMap() {
         ))}
 
         {/* Live helicopters - rotated by heading, green ring = military */}
-        {helisOn && helis.map((h) => (
+        {helis.map((h) => (
           <Marker key={h.hex} longitude={h.lon} latitude={h.lat} anchor="center">
             <button
               onClick={(e) => {
@@ -849,10 +844,10 @@ export default function GPSMap() {
             Saved ({savedRoutes.length})
           </button>
           <button
-            onClick={() => setHelisOn(!helisOn)}
-            className={`px-3 py-1.5 rounded-full text-xs font-medium shadow transition-colors ${helisOn ? 'bg-blue-600 text-white' : 'bg-white text-gray-700'}`}
+            onClick={() => setShowHeliList(!showHeliList)}
+            className={`px-3 py-1.5 rounded-full text-xs font-medium shadow transition-colors ${showHeliList ? 'bg-blue-600 text-white' : 'bg-white text-gray-700'}`}
           >
-            🚁 Helis{helisOn ? ` (${helis.length})` : ''}
+            🚁 Helis ({helis.length})
           </button>
         </div>
 
@@ -890,7 +885,7 @@ export default function GPSMap() {
         )}
 
         {/* Active helicopters list */}
-        {helisOn && (
+        {showHeliList && (
           <div className="mt-2 bg-white rounded-2xl shadow-lg max-h-56 overflow-y-auto">
             {helis.length === 0 ? (
               <div className="px-4 py-4 text-sm text-gray-500">No helicopters broadcasting nearby right now.</div>
@@ -922,7 +917,7 @@ export default function GPSMap() {
         )}
 
         {/* Selected helicopter detail card */}
-        {helisOn && selHeli && (
+        {selHeli && (
           <div className="mt-2 bg-white rounded-2xl shadow-lg px-4 py-3">
             <div className="flex items-start justify-between">
               <div className="min-w-0">
