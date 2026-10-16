@@ -160,11 +160,16 @@ export default function GPSMap() {
     const url = (exclude: string) =>
       `https://api.mapbox.com/directions/v5/mapbox/driving/${userLocation.longitude},${userLocation.latitude};${dest.longitude},${dest.latitude}?steps=true&geometries=geojson&alternatives=true${exclude}&access_token=${MAPBOX_TOKEN}`
 
-    const fetchBest = async (exclude: string) => {
+    const fetchBest = async (exclude: string, maxDuration?: number) => {
       const res = await fetch(url(exclude))
       const data = await res.json()
-      const routes: any[] = data.routes || []
+      let routes: any[] = data.routes || []
       if (routes.length === 0) return null
+      // Reject absurd detours (alleys/lots) when a reasonable alternative exists
+      if (maxDuration) {
+        const sane = routes.filter((r) => r.duration <= maxDuration)
+        if (sane.length > 0) routes = sane
+      }
       // prefer fewest cameras, then shortest time
       return routes.sort(
         (a, b) => camsNearRoute(a).length - camsNearRoute(b).length || a.duration - b.duration
@@ -174,6 +179,7 @@ export default function GPSMap() {
     try {
       let route = await fetchBest(buildExclude([]))
       if (!route) return
+      const saneDuration = route.duration * 1.6 // cap detours at ~60% longer than the base route
 
       if (camsStrict) {
         const excludedKeys = new Set<string>()
@@ -201,8 +207,11 @@ export default function GPSMap() {
           }
 
           try {
-            const better = await fetchBest(buildExclude(excludedPts))
-            if (better) route = better
+            const better = await fetchBest(buildExclude(excludedPts), saneDuration)
+            // only accept if it doesn't add cameras and isn't an absurd detour
+            if (better && camsNearRoute(better).length <= camsNearRoute(route).length) {
+              route = better
+            }
           } catch {
             break
           }
@@ -213,8 +222,8 @@ export default function GPSMap() {
           classes.push('motorway')
           motorwayAdded = true
           try {
-            const better = await fetchBest(buildExclude(excludedPts))
-            if (better) route = better
+            const better = await fetchBest(buildExclude(excludedPts), saneDuration)
+            if (better && camsNearRoute(better).length < camsNearRoute(route).length) route = better
           } catch {}
         }
 
@@ -290,7 +299,8 @@ export default function GPSMap() {
     const map = mapRef.current?.getMap()
     if (map && route) {
       if (map.getSource('route')) {
-        map.removeLayer('route')
+        if (map.getLayer('route')) map.removeLayer('route')
+        if (map.getLayer('route-casing')) map.removeLayer('route-casing')
         map.removeSource('route')
       }
 
@@ -300,6 +310,22 @@ export default function GPSMap() {
           type: 'Feature',
           properties: {},
           geometry: route.geometry
+        }
+      })
+
+      // White casing underneath so the line pops against the map
+      map.addLayer({
+        id: 'route-casing',
+        type: 'line',
+        source: 'route',
+        layout: {
+          'line-join': 'round',
+          'line-cap': 'round'
+        },
+        paint: {
+          'line-color': '#ffffff',
+          'line-width': 10,
+          'line-opacity': 0.9
         }
       })
 
@@ -314,7 +340,7 @@ export default function GPSMap() {
         paint: {
           'line-color': '#1a73e8',
           'line-width': 6,
-          'line-opacity': 0.85
+          'line-opacity': 0.95
         }
       })
     }
@@ -322,7 +348,8 @@ export default function GPSMap() {
     return () => {
       const m = mapRef.current?.getMap()
       if (m?.getSource('route')) {
-        m.removeLayer('route')
+        if (m.getLayer('route')) m.removeLayer('route')
+        if (m.getLayer('route-casing')) m.removeLayer('route-casing')
         m.removeSource('route')
       }
     }
