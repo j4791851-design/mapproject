@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
-import Map, { Marker, NavigationControl, GeolocateControl } from 'react-map-gl/mapbox'
+import Map, { Marker } from 'react-map-gl/mapbox'
 import 'mapbox-gl/dist/mapbox-gl.css'
 
 const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || ''
@@ -19,7 +19,12 @@ export default function GPSMap() {
   const [route, setRoute] = useState<any>(null)
   const [directions, setDirections] = useState<any[]>([])
   const [showSteps, setShowSteps] = useState(false)
+  const [follow, setFollow] = useState(false)
   const mapRef = useRef<any>(null)
+  const followRef = useRef(false)
+
+  // Keep followRef in sync so watchPosition callback can read latest value
+  followRef.current = follow
 
   // Get user's current location
   useEffect(() => {
@@ -29,6 +34,7 @@ export default function GPSMap() {
           const { longitude, latitude } = position.coords
           setUserLocation({ longitude, latitude })
           setViewState({ longitude, latitude, zoom: 15 })
+          setFollow(true)
         },
         (error) => {
           console.error('Error getting location:', error)
@@ -40,6 +46,16 @@ export default function GPSMap() {
         (position) => {
           const { longitude, latitude } = position.coords
           setUserLocation({ longitude, latitude })
+
+          // Follow mode: keep camera centered on user (like Google Maps navigation)
+          if (followRef.current) {
+            const map = mapRef.current?.getMap()
+            if (map) {
+              map.easeTo({ center: [longitude, latitude], duration: 500 })
+            } else {
+              setViewState((vs) => ({ ...vs, longitude, latitude }))
+            }
+          }
         },
         (error) => {
           console.error('Error watching location:', error)
@@ -79,6 +95,9 @@ export default function GPSMap() {
         setRoute(data.routes[0])
         setDirections(data.routes[0].legs[0].steps || [])
         setShowSteps(false)
+        // Lock camera onto user once navigation starts, like Google Maps
+        setFollow(true)
+        setViewState({ longitude: userLocation.longitude, latitude: userLocation.latitude, zoom: 16 })
       }
     } catch (error) {
       console.error('Error getting directions:', error)
@@ -91,6 +110,7 @@ export default function GPSMap() {
     if (lng == null || lat == null) return
     const dest = { longitude: lng, latitude: lat }
     setDestination(dest)
+    setFollow(false)
     setViewState({ longitude: lng, latitude: lat, zoom: 15 })
     setSearchResults([])
     setSearchQuery(result.place_name)
@@ -103,6 +123,18 @@ export default function GPSMap() {
     setDirections([])
     setDestination(null)
     setShowSteps(false)
+  }
+
+  // Target button: re-center on user and re-enable follow mode
+  const recenter = () => {
+    if (!userLocation) return
+    setFollow(true)
+    const map = mapRef.current?.getMap()
+    if (map) {
+      map.easeTo({ center: [userLocation.longitude, userLocation.latitude], zoom: Math.max(viewState.zoom, 15), duration: 600 })
+    } else {
+      setViewState({ longitude: userLocation.longitude, latitude: userLocation.latitude, zoom: 15 })
+    }
   }
 
   // Draw route on map when it changes
@@ -157,18 +189,15 @@ export default function GPSMap() {
       <Map
         ref={mapRef}
         {...viewState}
-        onMove={(evt) => setViewState(evt.viewState)}
+        onMove={(evt) => {
+          setViewState(evt.viewState)
+          // User panned/zoomed manually -> stop following
+          if ((evt as any).originalEvent) setFollow(false)
+        }}
         style={{ width: '100%', height: '100%' }}
         mapStyle="mapbox://styles/mapbox/streets-v12"
         mapboxAccessToken={MAPBOX_TOKEN}
       >
-        <NavigationControl position="bottom-right" showCompass={false} />
-        <GeolocateControl
-          position="bottom-right"
-          trackUserLocation
-          showUserHeading
-        />
-
         {/* User location marker */}
         {userLocation && (
           <Marker
@@ -251,15 +280,23 @@ export default function GPSMap() {
         )}
       </div>
 
-      {/* Compact directions card (bottom sheet style) */}
-      {directions.length > 0 && (
-        <div className="absolute bottom-0 left-0 right-0 z-20">
-          <div className="bg-white rounded-t-2xl shadow-2xl">
-            {/* Drag handle */}
-            <div className="flex justify-center pt-2">
-              <div className="w-10 h-1 bg-gray-300 rounded-full" />
-            </div>
+      {/* Target button - re-center on location (Google Maps style) */}
+      <button
+        onClick={recenter}
+        className={`absolute right-3 z-20 w-12 h-12 rounded-full shadow-lg flex items-center justify-center transition-colors ${directions.length > 0 ? 'bottom-32' : 'bottom-6'} ${follow ? 'bg-white' : 'bg-white'}`}
+        aria-label="Center on my location"
+      >
+        <svg className={`w-6 h-6 ${follow ? 'text-blue-600' : 'text-gray-600'}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="7" />
+          <circle cx="12" cy="12" r="2" fill="currentColor" />
+          <path d="M12 2v3M12 19v3M2 12h3M19 12h3" strokeLinecap="round" />
+        </svg>
+      </button>
 
+      {/* Compact floating directions card (non-swipeable, minimal) */}
+      {directions.length > 0 && (
+        <div className="absolute bottom-4 left-3 right-3 z-20 pointer-events-none">
+          <div className="bg-white rounded-2xl shadow-2xl pointer-events-auto max-w-md mx-auto">
             <div className="px-4 py-3">
               {/* ETA row */}
               <div className="flex items-center justify-between">
@@ -267,40 +304,43 @@ export default function GPSMap() {
                   <span className="text-green-700 font-bold text-lg">{etaMin} min</span>
                   <span className="text-gray-500 text-sm">{distKm} km</span>
                 </div>
-                <button
-                  onClick={clearRoute}
-                  className="text-gray-500 hover:text-gray-700 p-1"
-                >
-                  <svg className="w-6 h-6" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                    <path d="M6 6l12 12M18 6L6 18" strokeLinecap="round" />
-                  </svg>
-                </button>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setShowSteps(!showSteps)}
+                    className="text-xs text-blue-600 font-medium px-2 py-1"
+                  >
+                    {showSteps ? 'Hide' : 'Steps'}
+                  </button>
+                  <button
+                    onClick={clearRoute}
+                    className="text-gray-500 hover:text-gray-700 p-1"
+                    aria-label="Clear route"
+                  >
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                      <path d="M6 6l12 12M18 6L6 18" strokeLinecap="round" />
+                    </svg>
+                  </button>
+                </div>
               </div>
 
               {/* Next instruction */}
               {nextStep && (
-                <button
-                  onClick={() => setShowSteps(!showSteps)}
-                  className="w-full mt-2 flex items-center gap-3 text-left"
-                >
-                  <svg className="w-6 h-6 text-blue-600 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <div className="mt-1.5 flex items-center gap-3">
+                  <svg className="w-5 h-5 text-blue-600 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                     <path d="M9 18l6-6-6-6" strokeLinecap="round" strokeLinejoin="round" />
                   </svg>
                   <div className="flex-1 min-w-0">
-                    <p className="font-medium text-black truncate">{nextStep.maneuver?.instruction || 'Continue'}</p>
+                    <p className="font-medium text-black text-sm truncate">{nextStep.maneuver?.instruction || 'Continue'}</p>
                     <p className="text-xs text-gray-500">{nextStep.distance ? `${(nextStep.distance / 1000).toFixed(1)} km` : ''}</p>
                   </div>
-                  <span className="text-xs text-blue-600 font-medium shrink-0">
-                    {showSteps ? 'Hide' : 'Steps'}
-                  </span>
-                </button>
+                </div>
               )}
 
               {/* Expandable all steps */}
               {showSteps && (
-                <div className="mt-3 border-t border-gray-100 pt-2 max-h-48 overflow-y-auto space-y-1">
+                <div className="mt-2 border-t border-gray-100 pt-2 max-h-40 overflow-y-auto space-y-1">
                   {directions.map((step, index) => (
-                    <div key={index} className="py-1.5 flex items-start gap-2">
+                    <div key={index} className="py-1 flex items-start gap-2">
                       <span className="text-xs text-gray-400 w-5 shrink-0 mt-0.5">{index + 1}</span>
                       <div className="flex-1 min-w-0">
                         <p className="text-sm text-black">{step.maneuver?.instruction || 'Continue'}</p>
