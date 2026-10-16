@@ -96,11 +96,18 @@ export default function GPSMap() {
     getDirections(dest)
   }
 
+  // Clear route and reset navigation
+  const clearRoute = () => {
+    setRoute(null)
+    setDirections([])
+    setDestination(null)
+    setCurrentStep(0)
+  }
+
   // Draw route on map when it changes
   useEffect(() => {
-    if (mapRef.current && route) {
-      const map = mapRef.current
-
+    const map = mapRef.current?.getMap()
+    if (map && route) {
       // Remove existing route layer if it exists
       if (map.getSource('route')) {
         map.removeLayer('route')
@@ -134,15 +141,16 @@ export default function GPSMap() {
     }
 
     return () => {
-      if (mapRef.current && mapRef.current.getSource('route')) {
-        mapRef.current.removeLayer('route')
-        mapRef.current.removeSource('route')
+      const m = mapRef.current?.getMap()
+      if (m?.getSource('route')) {
+        m.removeLayer('route')
+        m.removeSource('route')
       }
     }
   }, [route])
 
   return (
-    <div className="relative w-full h-screen">
+    <div className="relative w-full h-dvh">
       <Map
         ref={mapRef}
         {...viewState}
@@ -182,15 +190,15 @@ export default function GPSMap() {
       </Map>
 
       {/* Search Bar */}
-      <div className="absolute top-4 left-4 z-10">
-        <div className="bg-white rounded-lg shadow-lg p-4 w-80">
+      <div className="absolute top-4 left-4 right-4 sm:right-auto z-20">
+        <div className="bg-white rounded-lg shadow-lg p-4 w-full sm:w-80">
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            onKeyPress={(e) => e.key === 'Enter' && handleSearch()}
+            onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
             placeholder="Search for a place..."
-            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-black"
           />
           <button
             onClick={handleSearch}
@@ -206,7 +214,7 @@ export default function GPSMap() {
                 <button
                   key={result.id}
                   onClick={() => selectResult(result)}
-                  className="w-full text-left px-3 py-2 hover:bg-gray-100 rounded-md transition-colors"
+                  className="w-full text-left px-3 py-2 hover:bg-gray-100 rounded-md transition-colors text-black"
                 >
                   {result.place_name}
                 </button>
@@ -218,22 +226,22 @@ export default function GPSMap() {
 
       {/* Turn-by-turn Directions */}
       {directions.length > 0 && (
-        <div className="absolute bottom-4 left-4 right-4 z-10">
-          <div className="bg-white rounded-lg shadow-lg p-4 max-w-md mx-auto">
-            <h3 className="font-semibold text-lg mb-2">Directions</h3>
+        <div className="absolute bottom-4 left-4 right-4 z-20">
+          <div className="bg-white rounded-lg shadow-lg p-4 max-w-md mx-auto max-h-[50vh] overflow-y-auto">
+            <h3 className="font-semibold text-lg mb-2 text-black">Directions</h3>
             <div className="space-y-2">
               {directions.map((step, index) => (
                 <div
                   key={index}
                   className={`p-2 rounded-md ${index === currentStep ? 'bg-blue-100 border-2 border-blue-500' : 'bg-gray-50'}`}
                 >
-                  <p className="font-medium">{step.maneuver?.instruction || 'Continue'}</p>
+                  <p className="font-medium text-black">{step.maneuver?.instruction || 'Continue'}</p>
                   <p className="text-sm text-gray-600">{step.distance ? `${(step.distance / 1000).toFixed(1)} km` : ''}</p>
                 </div>
               ))}
             </div>
             <button
-              onClick={() => setRoute(null)}
+              onClick={clearRoute}
               className="mt-4 w-full bg-red-500 text-white py-2 rounded-md hover:bg-red-600 transition-colors"
             >
               Clear Route
