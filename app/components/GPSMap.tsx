@@ -3,6 +3,8 @@
 import { useState, useEffect, useRef } from 'react'
 import Map, { Marker, Popup } from 'react-map-gl/mapbox'
 import mapboxgl from 'mapbox-gl'
+// @ts-ignore - no bundled types
+import NoSleep from 'nosleep.js'
 import 'mapbox-gl/dist/mapbox-gl.css'
 import { CAMERAS } from './cameras'
 import { POLICE } from './police'
@@ -93,7 +95,10 @@ export default function GPSMap() {
   const [helis, setHelis] = useState<any[]>([])
   const [selHeli, setSelHeli] = useState<any>(null)
   const [selPolice, setSelPolice] = useState<{ name: string; lng: number; lat: number } | null>(null)
+  const [wazePolice, setWazePolice] = useState<any[]>([])
+  const [speedKmh, setSpeedKmh] = useState<number>(0)
   const locRef = useRef(userLocation)
+  const lastFixRef = useRef<{ lng: number; lat: number; t: number } | null>(null)
   const userMarkerRef = useRef<any>(null)
   const targetLocRef = useRef<[number, number] | null>(null)
   const markerInitRef = useRef(false)
@@ -200,6 +205,19 @@ export default function GPSMap() {
 
           setUserLocation({ longitude, latitude })
 
+          // Speed display: prefer the device's own speed reading, fall back
+          // to distance/time between fixes. Deadband below ~4 km/h kills jitter.
+          let kmh = position.coords.speed != null ? position.coords.speed * 3.6 : NaN
+          if (isNaN(kmh)) {
+            const last = lastFixRef.current
+            if (last) {
+              const dt = (position.timestamp - last.t) / 1000
+              if (dt > 0) kmh = (distMeters(last.lng, last.lat, longitude, latitude) / dt) * 3.6
+            }
+          }
+          lastFixRef.current = { lng: longitude, lat: latitude, t: position.timestamp }
+          if (!isNaN(kmh)) setSpeedKmh(kmh < 4 ? 0 : Math.round(kmh))
+
           // Follow mode: keep camera centered on user (like Google Maps navigation)
           if (followRef.current) {
             if (map) {
@@ -244,35 +262,25 @@ export default function GPSMap() {
     }
   }, [])
 
-  // Keep the screen awake the whole time the site is open (stops phone
-  // screen timeout/dimming, not just during navigation)
+  // Keep the screen awake the whole time the site is open. On iOS the Wake
+  // Lock API is unreliable (all iOS browsers are WebKit), so NoSleep also
+  // plays a tiny hidden looping video - the reliable way to block the iPhone
+  // screen timeout. Needs a user gesture to start video -> enable on any tap.
   useEffect(() => {
-    const nav = navigator as any
-    if (!('wakeLock' in nav)) return
-    let lock: any = null
-
-    const request = async () => {
-      try {
-        lock = await nav.wakeLock.request('screen')
-      } catch {}
+    const noSleep = new NoSleep()
+    const enable = () => {
+      try { noSleep.enable() } catch {}
     }
-
     const reacquire = () => {
-      // wake lock auto-releases when tab hidden - re-grab on return
-      if (document.visibilityState === 'visible') request()
+      if (document.visibilityState === 'visible') enable()
     }
-    // Some browsers only grant wake lock after a user gesture - retry on first touch
-    const onGesture = () => {
-      if (!lock || lock.released) request()
-    }
-
-    request()
+    enable()
+    document.addEventListener('pointerdown', enable)
     document.addEventListener('visibilitychange', reacquire)
-    document.addEventListener('pointerdown', onGesture)
     return () => {
+      document.removeEventListener('pointerdown', enable)
       document.removeEventListener('visibilitychange', reacquire)
-      document.removeEventListener('pointerdown', onGesture)
-      lock?.release?.().catch(() => {})
+      try { noSleep.disable() } catch {}
     }
   }, [])
 
@@ -340,6 +348,38 @@ export default function GPSMap() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- location read via ref so GPS ticks don't retrigger fetches
   }, [])
+
+  // Live police sightings funneled from the Waze Live Map feed via our proxy.
+  // Fully optional: any failure returns [] and only this layer stays empty.
+  useEffect(() => {
+    let alive = true
+    const load = async () => {
+      const loc = locRef.current
+      if (!loc) return
+      try {
+        const r = await fetch(`/api/waze?lat=${loc.latitude.toFixed(3)}&lng=${loc.longitude.toFixed(3)}`)
+        if (!r.ok) return
+        const d = await r.json()
+        if (alive) setWazePolice(Array.isArray(d.alerts) ? d.alerts : [])
+      } catch {
+        /* layer quietly stays empty */
+      }
+    }
+    load()
+    const iv = setInterval(load, 90000)
+    return () => {
+      alive = false
+      clearInterval(iv)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- location read via ref so GPS ticks don't retrigger fetches
+  }, [])
+
+  const wazeLabel = (w: any) => {
+    const kind = w.type.includes('HIDING') ? 'Police reported (hidden)' : 'Police reported (visible)'
+    const age = w.ts ? Math.max(0, Math.round((Date.now() - w.ts) / 60000)) : null
+    const where = w.street || w.city || ''
+    return `${kind}${where ? ' · ' + where : ''}${age != null ? ` · ${age}m ago` : ''}`
+  }
 
   const saveCurrentRoute = async (name: string) => {
     if (!destination) return
@@ -886,6 +926,22 @@ export default function GPSMap() {
             </button>
           </Marker>
         ))}
+        {/* Waze-sourced live police sightings - red ring, tap for details */}
+        {wazePolice.map((w) => (
+          <Marker key={w.id} longitude={w.lng} latitude={w.lat} anchor="center">
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                setSelPolice({ name: wazeLabel(w), lng: w.lng, lat: w.lat })
+              }}
+              className="w-8 h-8 rounded-full flex items-center justify-center text-base shadow-md bg-white border-2 border-red-500"
+              title={wazeLabel(w)}
+            >
+              🚔
+            </button>
+          </Marker>
+        ))}
+
         {/* Police station popup */}
         {selPolice && (
           <Popup
@@ -1153,6 +1209,17 @@ export default function GPSMap() {
           <path d="M15 3h4a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1h-4M10 17l5-5-5-5M15 12H3" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </button>
+
+      {/* Speed display - Google Maps style bubble */}
+      {userLocation && (
+        <div
+          className={`absolute left-3 z-20 w-14 h-14 rounded-full shadow-lg bg-white flex flex-col items-center justify-center transition-all ${directions.length > 0 ? 'bottom-32' : 'bottom-6'}`}
+          aria-label="Current speed"
+        >
+          <span className="text-lg font-bold text-black leading-none">{speedKmh}</span>
+          <span className="text-[9px] text-gray-500 font-medium">km/h</span>
+        </div>
+      )}
 
       {/* Target button - re-center on location (Google Maps style) */}
       <button
