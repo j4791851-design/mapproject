@@ -158,29 +158,38 @@ export default function GPSMap() {
     }
 
     const url = (exclude: string) =>
-      `https://api.mapbox.com/directions/v5/mapbox/driving/${userLocation.longitude},${userLocation.latitude};${dest.longitude},${dest.latitude}?steps=true&geometries=geojson${exclude}&access_token=${MAPBOX_TOKEN}`
+      `https://api.mapbox.com/directions/v5/mapbox/driving/${userLocation.longitude},${userLocation.latitude};${dest.longitude},${dest.latitude}?steps=true&geometries=geojson&alternatives=true${exclude}&access_token=${MAPBOX_TOKEN}`
+
+    const fetchBest = async (exclude: string) => {
+      const res = await fetch(url(exclude))
+      const data = await res.json()
+      const routes: any[] = data.routes || []
+      if (routes.length === 0) return null
+      // prefer fewest cameras, then shortest time
+      return routes.sort(
+        (a, b) => camsNearRoute(a).length - camsNearRoute(b).length || a.duration - b.duration
+      )[0]
+    }
 
     try {
-      const res = await fetch(url(buildExclude([])))
-      const data = await res.json()
-      let route = data.routes?.[0]
+      let route = await fetchBest(buildExclude([]))
       if (!route) return
 
       if (camsStrict) {
         const excludedKeys = new Set<string>()
         const excludedPts: [number, number][] = []
-        let addedMotorway = false
+        let motorwayAdded = classes.includes('motorway')
 
-        for (let attempt = 0; attempt < 5; attempt++) {
+        for (let attempt = 0; attempt < 6; attempt++) {
           const cams = camsNearRoute(route, 200)
           const fresh = cams.filter(([lng, lat]) => !excludedKeys.has(`${lng},${lat}`))
           if (fresh.length === 0) break
 
           if (excludedPts.length >= 50) {
-            // Exclusion point limit hit - last resort: also drop motorways where most cams live
-            if (!addedMotorway && !classes.includes('motorway')) {
+            // Exclusion point cap reached - drop motorways (where most cams live) as last resort
+            if (!motorwayAdded) {
               classes.push('motorway')
-              addedMotorway = true
+              motorwayAdded = true
               continue
             }
             break
@@ -192,24 +201,29 @@ export default function GPSMap() {
           }
 
           try {
-            const res2 = await fetch(url(buildExclude(excludedPts)))
-            const data2 = await res2.json()
-            if (data2.routes?.[0]) {
-              route = data2.routes[0]
-            } else {
-              break
-            }
+            const better = await fetchBest(buildExclude(excludedPts))
+            if (better) route = better
           } catch {
             break
           }
         }
 
+        // Still cameras on the route? Force motorway exclusion even if under the point cap
+        if (camsNearRoute(route).length > 0 && !motorwayAdded) {
+          classes.push('motorway')
+          motorwayAdded = true
+          try {
+            const better = await fetchBest(buildExclude(excludedPts))
+            if (better) route = better
+          } catch {}
+        }
+
         const remaining = camsNearRoute(route)
         setCamsOnRoute(remaining.length)
-        if (remaining.length === 0 && excludedPts.length > 0) {
-          speak(`Route set, avoiding ${excludedPts.length} traffic cameras`)
-        } else if (remaining.length > 0) {
-          speak(`Warning: route passes ${remaining.length} traffic camera${remaining.length > 1 ? 's' : ''}`)
+        if (remaining.length === 0) {
+          speak('Camera-free route set')
+        } else {
+          speak(`Warning: no camera-free route found. Route passes ${remaining.length} camera${remaining.length > 1 ? 's' : ''}`)
         }
       } else {
         setCamsOnRoute(null)
