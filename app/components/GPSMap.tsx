@@ -1,9 +1,10 @@
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
-import Map, { Marker } from 'react-map-gl/mapbox'
+import Map, { Marker, Popup } from 'react-map-gl/mapbox'
 import 'mapbox-gl/dist/mapbox-gl.css'
 import { CAMERAS } from './cameras'
+import { POLICE } from './police'
 
 const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || ''
 
@@ -91,6 +92,7 @@ export default function GPSMap() {
   const [showHeliList, setShowHeliList] = useState(false)
   const [helis, setHelis] = useState<any[]>([])
   const [selHeli, setSelHeli] = useState<any>(null)
+  const [selPolice, setSelPolice] = useState<{ name: string; lng: number; lat: number } | null>(null)
   const locRef = useRef(userLocation)
 
   // Keep refs in sync so geolocation callback can read latest values
@@ -656,6 +658,10 @@ export default function GPSMap() {
 
           map.addImage('cam-icon', ctx.getImageData(0, 0, size, size))
 
+          const pCanvas = document.createElement('canvas')
+          pCanvas.width = size
+          pCanvas.height = size
+
           map.addSource('traffic-cams', {
             type: 'geojson',
             data: {
@@ -678,6 +684,54 @@ export default function GPSMap() {
               'icon-allow-overlap': true
             }
           })
+
+          // Police badge icon: blue circle with white star
+          const pCtx = pCanvas.getContext('2d')!
+          pCtx.beginPath()
+          pCtx.arc(32, 32, 30, 0, Math.PI * 2)
+          pCtx.fillStyle = '#1d4ed8'
+          pCtx.fill()
+          pCtx.strokeStyle = '#ffffff'
+          pCtx.lineWidth = 3
+          pCtx.stroke()
+          pCtx.fillStyle = '#ffffff'
+          pCtx.beginPath()
+          const cx = 32, cy = 32, spikes = 5, outer = 16, inner = 7
+          let rot = (-Math.PI / 2)
+          const step = Math.PI / spikes
+          pCtx.moveTo(cx, cy - outer)
+          for (let i = 0; i < spikes; i++) {
+            pCtx.lineTo(cx + Math.cos(rot) * outer, cy + Math.sin(rot) * outer)
+            rot += step
+            pCtx.lineTo(cx + Math.cos(rot) * inner, cy + Math.sin(rot) * inner)
+            rot += step
+          }
+          pCtx.closePath()
+          pCtx.fill()
+          map.addImage('police-icon', pCtx.getImageData(0, 0, size, size))
+
+          map.addSource('police-stations', {
+            type: 'geojson',
+            data: {
+              type: 'FeatureCollection',
+              features: POLICE.map(([lng, lat, name]) => ({
+                type: 'Feature',
+                properties: { name },
+                geometry: { type: 'Point', coordinates: [lng, lat] }
+              }))
+            }
+          })
+
+          map.addLayer({
+            id: 'police-stations',
+            type: 'symbol',
+            source: 'police-stations',
+            layout: {
+              'icon-image': 'police-icon',
+              'icon-size': 0.42,
+              'icon-allow-overlap': true
+            }
+          })
         }}
         onMove={(evt) => {
           setViewState(evt.viewState)
@@ -685,9 +739,15 @@ export default function GPSMap() {
           if ((evt as any).originalEvent) setFollow(false)
         }}
         onClick={(evt) => {
+          const f = (evt as any).features?.[0]
+          if (f?.layer?.id === 'police-stations') {
+            setSelPolice({ name: f.properties?.name || 'Police station', lng: evt.lngLat.lng, lat: evt.lngLat.lat })
+            return
+          }
           // Custom route mode: tap the map to steer the route around cameras
           if (customMode && route) addWaypoint(evt.lngLat.lng, evt.lngLat.lat)
         }}
+        interactiveLayerIds={['police-stations']}
         style={{ width: '100%', height: '100%' }}
         cursor={customMode && route ? 'crosshair' : 'grab'}
         mapStyle="mapbox://styles/mapbox/streets-v12"
@@ -754,6 +814,20 @@ export default function GPSMap() {
             </button>
           </Marker>
         ))}
+        {/* Police station popup */}
+        {selPolice && (
+          <Popup
+            longitude={selPolice.lng}
+            latitude={selPolice.lat}
+            anchor="bottom"
+            offset={18}
+            closeOnClick={false}
+            onClose={() => setSelPolice(null)}
+            className="text-black"
+          >
+            <div className="text-sm font-medium px-1 py-0.5">{selPolice.name}</div>
+          </Popup>
+        )}
       </Map>
 
       {/* Floating pill search bar */}
