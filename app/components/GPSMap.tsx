@@ -45,6 +45,7 @@ export default function GPSMap() {
   const stepIdxRef = useRef(0)
   const announcedRef = useRef(-1)
   const stepsRef = useRef<any[]>([])
+  const justSelectedRef = useRef(false)
 
   // Keep refs in sync so geolocation callback can read latest values
   followRef.current = follow
@@ -119,20 +120,34 @@ export default function GPSMap() {
     }
   }, [])
 
-  // Search for places
-  const handleSearch = async () => {
-    if (!searchQuery || !MAPBOX_TOKEN) return
-
-    try {
-      const response = await fetch(
-        `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(searchQuery)}.json?access_token=${MAPBOX_TOKEN}`
-      )
-      const data = await response.json()
-      setSearchResults(data.features || [])
-    } catch (error) {
-      console.error('Error searching:', error)
+  // Live autocomplete search - fires as you type, biased toward your location,
+  // covers businesses (POI), addresses, and neighborhoods like Google Maps
+  useEffect(() => {
+    if (!searchQuery.trim() || !MAPBOX_TOKEN) {
+      setSearchResults([])
+      return
     }
-  }
+    if (justSelectedRef.current) {
+      justSelectedRef.current = false
+      return
+    }
+
+    const t = setTimeout(async () => {
+      try {
+        const prox = userLocation
+          ? `&proximity=${userLocation.longitude},${userLocation.latitude}`
+          : ''
+        const response = await fetch(
+          `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(searchQuery)}.json?access_token=${MAPBOX_TOKEN}&autocomplete=true&limit=8&types=poi%2Caddress%2Cneighborhood%2Clocality%2Cplace${prox}`
+        )
+        const data = await response.json()
+        setSearchResults(data.features || [])
+      } catch (error) {
+        console.error('Error searching:', error)
+      }
+    }, 300)
+    return () => clearTimeout(t)
+  }, [searchQuery, userLocation])
 
   // Cameras within radius of a route, sorted closest-first
   const camsOnPath = (r: any, radius = 150) => {
@@ -273,7 +288,8 @@ export default function GPSMap() {
     setFollow(false)
     setViewState({ longitude: lng, latitude: lat, zoom: 15 })
     setSearchResults([])
-    setSearchQuery(result.place_name)
+    justSelectedRef.current = true
+    setSearchQuery(result.text || result.place_name)
     getDirections(dest, { tolls: avoidTolls, highways: avoidHighways, cams: avoidCams, wps: [] })
   }
 
@@ -515,8 +531,7 @@ export default function GPSMap() {
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-            placeholder="Search here"
+            placeholder="Search for a place or address"
             className="flex-1 min-w-0 px-3 py-1 bg-transparent focus:outline-none text-black placeholder-gray-500"
           />
           {searchQuery && (
@@ -529,12 +544,6 @@ export default function GPSMap() {
               </svg>
             </button>
           )}
-          <button
-            onClick={handleSearch}
-            className="ml-1 text-blue-600 font-medium shrink-0"
-          >
-            Search
-          </button>
         </div>
 
         {/* Route option toggles */}
@@ -598,22 +607,40 @@ export default function GPSMap() {
           </div>
         )}
 
-        {/* Search Results dropdown */}
+        {/* Search Results dropdown - name on top, address below, Google style */}
         {searchResults.length > 0 && (
           <div className="mt-2 bg-white rounded-2xl shadow-lg max-h-72 overflow-y-auto">
-            {searchResults.map((result, i) => (
-              <button
-                key={result.id}
-                onClick={() => selectResult(result)}
-                className={`w-full text-left px-4 py-3 hover:bg-gray-100 flex items-start gap-3 ${i > 0 ? 'border-t border-gray-100' : ''} first:rounded-t-2xl last:rounded-b-2xl`}
-              >
-                <svg className="w-5 h-5 text-gray-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                  <path d="M12 21s-7-5.1-7-11a7 7 0 1 1 14 0c0 5.9-7 11-7 11z" />
-                  <circle cx="12" cy="10" r="2.5" />
-                </svg>
-                <span className="text-sm text-black leading-snug">{result.place_name}</span>
-              </button>
-            ))}
+            {searchResults.map((result, i) => {
+              const isPoi = result.place_type?.includes('poi')
+              const name = result.text || result.place_name
+              const addr = result.place_name?.startsWith(name)
+                ? result.place_name.slice(name.length).replace(/^,\s*/, '')
+                : result.place_name
+              return (
+                <button
+                  key={result.id}
+                  onClick={() => selectResult(result)}
+                  className={`w-full text-left px-4 py-3 hover:bg-gray-100 flex items-start gap-3 ${i > 0 ? 'border-t border-gray-100' : ''} first:rounded-t-2xl last:rounded-b-2xl`}
+                >
+                  <div className={`w-9 h-9 rounded-full shrink-0 flex items-center justify-center ${isPoi ? 'bg-blue-100' : 'bg-gray-100'}`}>
+                    {isPoi ? (
+                      <svg className="w-4.5 h-4.5 text-blue-600" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                        <path d="M3 9l1-5h16l1 5M4 9v11h16V9M9 20v-6h6v6" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    ) : (
+                      <svg className="w-4.5 h-4.5 text-gray-500" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                        <path d="M12 21s-7-5.1-7-11a7 7 0 1 1 14 0c0 5.9-7 11-7 11z" />
+                        <circle cx="12" cy="10" r="2.5" />
+                      </svg>
+                    )}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-black truncate">{name}</div>
+                    {addr && <div className="text-xs text-gray-500 truncate">{addr}</div>}
+                  </div>
+                </button>
+              )
+            })}
           </div>
         )}
       </div>
