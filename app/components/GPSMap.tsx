@@ -248,8 +248,11 @@ export default function GPSMap() {
       stepIdxRef.current = 0
       announcedRef.current = -1
       // Lock camera onto user once navigation starts, like Google Maps
-      setFollow(true)
-      setViewState({ longitude: userLocation.longitude, latitude: userLocation.latitude, zoom: 16 })
+      // (skip while custom-planning so waypoint taps don't yank the camera)
+      if (!customMode) {
+        setFollow(true)
+        setViewState({ longitude: userLocation.longitude, latitude: userLocation.latitude, zoom: 16 })
+      }
       // Announce first instruction (also unlocks speech on iOS, since this runs after a tap)
       if (steps[0]?.maneuver?.instruction) {
         speak(steps[0].maneuver.instruction)
