@@ -1,9 +1,11 @@
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
-import Map, { Marker } from 'react-map-gl/mapbox'
+import Map, { Marker, Popup } from 'react-map-gl/mapbox'
+import mapboxgl from 'mapbox-gl'
 import 'mapbox-gl/dist/mapbox-gl.css'
 import { CAMERAS } from './cameras'
+import { POLICE } from './police'
 
 const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || ''
 
@@ -16,6 +18,44 @@ const distMeters = (aLng: number, aLat: number, bLng: number, bLat: number) => {
     Math.sin(dLat / 2) ** 2 +
     Math.cos((aLat * Math.PI) / 180) * Math.cos((bLat * Math.PI) / 180) * Math.sin(dLng / 2) ** 2
   return 2 * R * Math.asin(Math.sqrt(s))
+}
+
+// Compass bearing (deg) from point a to point b
+const bearingDeg = (aLng: number, aLat: number, bLng: number, bLat: number) => {
+  const p1 = (aLat * Math.PI) / 180
+  const p2 = (bLat * Math.PI) / 180
+  const dl = ((bLng - aLng) * Math.PI) / 180
+  const y = Math.sin(dl) * Math.cos(p2)
+  const x = Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl)
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360
+}
+const compass = (b: number) => ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(b / 45) % 8]
+
+// ICAO type designators that are helicopters (category A7 catches most, this is a fallback)
+const HELI_TYPES = new Set([
+  'R22', 'R44', 'R66', 'B06', 'B06T', 'B407', 'B412', 'B427', 'B429', 'B430', 'B505', 'B47G', 'B47T',
+  'UH1', 'UH60', 'H60', 'H64', 'H47', 'H53', 'H53S', 'H65', 'H72', 'H160', 'H155', 'HUCO',
+  'EC20', 'EC25', 'EC30', 'EC35', 'EC45', 'EC55', 'EC75', 'AS32', 'AS3B', 'AS50', 'AS55', 'AS65',
+  'A109', 'A119', 'A139', 'A149', 'A169', 'A189', 'S61', 'S76', 'S92', 'SK76',
+  'MD50', 'MD52', 'MD60', 'EXPL', 'GAZL', 'LAMA', 'ALOU', 'EN28', 'EN48', 'F28', 'F28F',
+  'H269', 'H500', 'KMAX', 'MI8', 'MI24', 'MI38', 'KA26', 'KA32', 'KA52', 'NH90', 'TIGR', 'PUMA', 'LYNX', 'W3',
+])
+
+const HELI_NAMES: Record<string, string> = {
+  R22: 'Robinson R22', R44: 'Robinson R44', R66: 'Robinson R66',
+  B06: 'Bell 206 JetRanger', B407: 'Bell 407', B412: 'Bell 412', B427: 'Bell 427', B429: 'Bell 429', B505: 'Bell 505',
+  UH1: 'Bell UH-1 Huey', H60: 'Sikorsky UH-60 Black Hawk', UH60: 'Sikorsky UH-60 Black Hawk',
+  H64: 'Boeing AH-64 Apache', H47: 'Boeing CH-47 Chinook', H53S: 'Sikorsky CH-53E Super Stallion', H53: 'Sikorsky CH-53',
+  H65: 'Airbus MH-65 Dolphin', H72: 'Airbus UH-72 Lakota', H160: 'Airbus H160', H155: 'Airbus H155',
+  EC20: 'Eurocopter EC120', EC30: 'Eurocopter EC130', EC35: 'Airbus H135', EC45: 'Airbus H145', EC55: 'Eurocopter EC155',
+  AS32: 'AS332 Super Puma', AS3B: 'AS332 Super Puma', AS50: 'Airbus H125 / AS350 AStar', AS55: 'AS355 TwinStar', AS65: 'AS365 Dauphin',
+  A109: 'AgustaWestland AW109', A119: 'AgustaWestland AW119', A139: 'Leonardo AW139', A149: 'Leonardo AW149',
+  A169: 'Leonardo AW169', A189: 'Leonardo AW189',
+  S61: 'Sikorsky S-61', S76: 'Sikorsky S-76', S92: 'Sikorsky S-92',
+  MD52: 'MD 520N NOTAR', MD60: 'MD 600N', EXPL: 'MD 900 Explorer',
+  GAZL: 'Aérospatiale Gazelle', LAMA: 'Aérospatiale Lama', ALOU: 'Aérospatiale Alouette',
+  H269: 'Schweizer 269', H500: 'MD 500', MI8: 'Mil Mi-8', MI24: 'Mil Mi-24 Hind', KA32: 'Kamov Ka-32',
+  NH90: 'NHIndustries NH90', TIGR: 'Eurocopter Tiger', PUMA: 'SA330 Puma', LYNX: 'Westland Lynx',
 }
 
 export default function GPSMap() {
@@ -46,15 +86,63 @@ export default function GPSMap() {
   const mapRef = useRef<any>(null)
   const followRef = useRef(false)
   const voiceRef = useRef(true)
-  const stepIdxRef = useRef(0)
-  const announcedRef = useRef(-1)
+  const announcedRef = useRef<any>(null)
   const stepsRef = useRef<any[]>([])
   const justSelectedRef = useRef(false)
+  const [showHeliList, setShowHeliList] = useState(false)
+  const [helis, setHelis] = useState<any[]>([])
+  const [selHeli, setSelHeli] = useState<any>(null)
+  const [selPolice, setSelPolice] = useState<{ name: string; lng: number; lat: number } | null>(null)
+  const locRef = useRef(userLocation)
+  const userMarkerRef = useRef<any>(null)
+  const targetLocRef = useRef<[number, number] | null>(null)
+  const markerInitRef = useRef(false)
 
   // Keep refs in sync so geolocation callback can read latest values
   followRef.current = follow
   voiceRef.current = voiceOn
   stepsRef.current = directions
+  locRef.current = userLocation
+
+  // User dot marker: imperative mapboxgl marker so it can glide frame-by-frame
+  // without React re-renders. Blue dot + pulsing ring + heading cone, Google-style.
+  const ensureUserMarker = (map: any) => {
+    if (userMarkerRef.current) return userMarkerRef.current
+    const el = document.createElement('div')
+    el.style.cssText = 'position:relative;width:0;height:0'
+    el.innerHTML = `
+      <div class="gps-cone" style="display:none;position:absolute;left:-11px;top:-34px;width:0;height:0;border-left:11px solid transparent;border-right:11px solid transparent;border-top:32px solid rgba(66,133,244,0.35);transform-origin:11px 34px"></div>
+      <div style="position:absolute;left:-14px;top:-14px;width:28px;height:28px;border-radius:50%;background:rgba(66,133,244,0.25);animation:gpsPulse 2s ease-out infinite"></div>
+      <div style="position:absolute;left:-8px;top:-8px;width:16px;height:16px;border-radius:50%;background:#4285f4;border:2.5px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.4)"></div>`
+    const mk = new mapboxgl.Marker({ element: el, anchor: 'center' })
+    mk.setLngLat([0, 0]).addTo(map)
+    userMarkerRef.current = mk
+    return mk
+  }
+
+  // Glide the user dot toward each new GPS fix instead of teleporting
+  useEffect(() => {
+    let raf = 0
+    const tick = () => {
+      const mk = userMarkerRef.current
+      const t = targetLocRef.current
+      if (mk && t) {
+        const cur = mk.getLngLat()
+        if (!cur.lng && !cur.lat) {
+          mk.setLngLat(t)
+        } else {
+          const f = 0.14 // ~7 frames to converge at 60fps
+          const dlng = t[0] - cur.lng
+          const dlat = t[1] - cur.lat
+          if (Math.abs(dlng) + Math.abs(dlat) < 1e-7) mk.setLngLat(t)
+          else mk.setLngLat([cur.lng + dlng * f, cur.lat + dlat * f])
+        }
+      }
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [])
 
   // Speak a navigation instruction
   const speak = (text: string) => {
@@ -66,8 +154,9 @@ export default function GPSMap() {
     synth.speak(utterance)
   }
 
-  // Get user's current location
+  // Get user's current location - high accuracy so fixes are fast and precise
   useEffect(() => {
+    const geoOpts = { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (position) => {
@@ -78,56 +167,88 @@ export default function GPSMap() {
         },
         (error) => {
           console.error('Error getting location:', error)
-        }
+        },
+        geoOpts
       )
 
       // Watch for location changes
       const watchId = navigator.geolocation.watchPosition(
         (position) => {
           const { longitude, latitude } = position.coords
+          targetLocRef.current = [longitude, latitude]
+
+          const map = mapRef.current?.getMap()
+          if (map) {
+            // Create/update the gliding marker imperatively (no React re-render per frame)
+            const mk = ensureUserMarker(map)
+            if (!markerInitRef.current) {
+              mk.setLngLat([longitude, latitude])
+              markerInitRef.current = true
+            }
+            // Heading cone (when device reports a bearing)
+            const hdg = position.coords.heading
+            const cone = mk.getElement().querySelector('.gps-cone') as HTMLElement | null
+            if (cone) {
+              if (hdg != null && !isNaN(hdg)) {
+                cone.style.display = 'block'
+                cone.style.transform = `rotate(${hdg}deg)`
+              } else {
+                cone.style.display = 'none'
+              }
+            }
+          }
+
           setUserLocation({ longitude, latitude })
 
           // Follow mode: keep camera centered on user (like Google Maps navigation)
           if (followRef.current) {
-            const map = mapRef.current?.getMap()
             if (map) {
-              map.easeTo({ center: [longitude, latitude], duration: 500 })
+              // linear easing = constant glide, no rubber-band stall between fixes
+              map.easeTo({ center: [longitude, latitude], duration: 900, easing: (t: number) => t })
             } else {
               setViewState((vs) => ({ ...vs, longitude, latitude }))
             }
           }
 
-          // Voice guidance: announce instruction when approaching its maneuver point
+          // Voice guidance: announce instruction when approaching its maneuver point.
+          // directions[] holds only REMAINING steps - passed turns get removed below.
           const steps = stepsRef.current
-          const idx = stepIdxRef.current
-          const next = steps[idx]
+          const next = steps[0]
           if (next?.maneuver?.location) {
             const [mLng, mLat] = next.maneuver.location
             const d = distMeters(longitude, latitude, mLng, mLat)
-            if (d < 50 && announcedRef.current !== idx) {
-              announcedRef.current = idx
+            if (d < 50 && announcedRef.current !== next) {
+              announcedRef.current = next
               const text = next.maneuver?.instruction || 'Continue'
               speak(`In ${Math.round(d)} meters, ${text}`)
             }
-            if (d < 12 && steps[idx + 1]) {
-              // Passed the maneuver - advance to next step
-              stepIdxRef.current = idx + 1
+            if (d < 12 && steps.length > 1) {
+              // Passed the maneuver - drop it so only upcoming turns remain,
+              // and read out the new next step right away
+              setDirections((prev) => prev.slice(1))
+              const upcoming = steps[1]
+              if (upcoming?.maneuver?.instruction) {
+                speak(`Then, ${upcoming.maneuver.instruction}`)
+                announcedRef.current = upcoming
+              }
             }
           }
         },
         (error) => {
           console.error('Error watching location:', error)
-        }
+        },
+        geoOpts
       )
 
       return () => navigator.geolocation.clearWatch(watchId)
     }
   }, [])
 
-  // Keep the screen awake while navigating (stops phone from dimming/locking)
+  // Keep the screen awake the whole time the site is open (stops phone
+  // screen timeout/dimming, not just during navigation)
   useEffect(() => {
     const nav = navigator as any
-    if (!('wakeLock' in nav) || !route) return
+    if (!('wakeLock' in nav)) return
     let lock: any = null
 
     const request = async () => {
@@ -140,14 +261,20 @@ export default function GPSMap() {
       // wake lock auto-releases when tab hidden - re-grab on return
       if (document.visibilityState === 'visible') request()
     }
+    // Some browsers only grant wake lock after a user gesture - retry on first touch
+    const onGesture = () => {
+      if (!lock || lock.released) request()
+    }
 
     request()
     document.addEventListener('visibilitychange', reacquire)
+    document.addEventListener('pointerdown', onGesture)
     return () => {
       document.removeEventListener('visibilitychange', reacquire)
+      document.removeEventListener('pointerdown', onGesture)
       lock?.release?.().catch(() => {})
     }
-  }, [route])
+  }, [])
 
   // Load saved routes once (user is always signed in past the AuthGate)
   useEffect(() => {
@@ -155,6 +282,63 @@ export default function GPSMap() {
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => d && setSavedRoutes(d.routes || []))
       .catch(() => {})
+  }, [])
+
+  // Live helicopter tracking via airplanes.live ADS-B (free, no key, includes military/police).
+  // Point endpoint caps at 250nm (~463km); the /mil feed covers military anywhere, filtered to 1000km.
+  useEffect(() => {
+    let alive = true
+    const load = async () => {
+      const loc = locRef.current ?? (() => {
+        const c = mapRef.current?.getMap()?.getCenter()
+        return c ? { longitude: c.lng, latitude: c.lat } : null
+      })()
+      if (!loc) return
+      const [point, mil] = await Promise.all([
+        fetch(`https://api.airplanes.live/v2/point/${loc.latitude.toFixed(4)}/${loc.longitude.toFixed(4)}/250`)
+          .then((r) => r.json()).catch(() => null),
+        fetch('https://api.airplanes.live/v2/mil').then((r) => r.json()).catch(() => null),
+      ])
+      const seen = new Set<string>()
+      const out: any[] = []
+      const push = (a: any, isMil: boolean) => {
+        if (!a?.hex || a.lat == null || a.lon == null || seen.has(a.hex)) return
+        const t = (a.t || '').toUpperCase().trim()
+        if (a.category !== 'A7' && !HELI_TYPES.has(t)) return
+        const dKm = distMeters(loc.longitude, loc.latitude, a.lon, a.lat) / 1000
+        if (dKm > 1000) return
+        seen.add(a.hex)
+        out.push({
+          hex: a.hex,
+          callsign: (a.flight || '').trim(),
+          reg: a.r || '',
+          type: t,
+          name: HELI_NAMES[t] || (t ? `Type ${t}` : 'Helicopter'),
+          lat: a.lat,
+          lon: a.lon,
+          alt: a.alt_baro === 'ground' ? 0 : a.alt_baro ?? null,
+          gs: a.gs ?? null,
+          track: a.track ?? null,
+          squawk: a.squawk || '',
+          emergency: a.emergency && a.emergency !== 'none' ? a.emergency : '',
+          mil: isMil || !!(a.dbFlags & 1),
+          distKm: dKm,
+        })
+      }
+      point?.ac?.forEach((a: any) => push(a, false))
+      mil?.ac?.forEach((a: any) => push(a, true))
+      if (!alive) return
+      out.sort((a, b) => a.distKm - b.distKm)
+      setHelis(out)
+      setSelHeli((s: any) => (s ? out.find((h) => h.hex === s.hex) ?? s : s))
+    }
+    load()
+    const iv = setInterval(load, 20000)
+    return () => {
+      alive = false
+      clearInterval(iv)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- location read via ref so GPS ticks don't retrigger fetches
   }, [])
 
   const saveCurrentRoute = async (name: string) => {
@@ -185,10 +369,15 @@ export default function GPSMap() {
     }
   }
 
-  const loadSavedRoute = (r: any) => {
-    const dest = { longitude: r.dest_lng, latitude: r.dest_lat }
-    const wps = (r.waypoints || []).map((w: any) => ({ longitude: w.longitude, latitude: w.latitude }))
+  const loadSavedRoute = async (r: any) => {
     setShowSaved(false)
+    const dest = { longitude: Number(r.dest_lng), latitude: Number(r.dest_lat) }
+    // JSONB may come back as a string depending on the driver - normalize
+    const raw = typeof r.waypoints === 'string' ? JSON.parse(r.waypoints) : r.waypoints || []
+    const wps = (Array.isArray(raw) ? raw : []).map((w: any) => ({
+      longitude: Number(w.longitude),
+      latitude: Number(w.latitude),
+    }))
     setDestination(dest)
     setWaypoints(wps)
     setAvoidTolls(!!r.avoid_tolls)
@@ -198,12 +387,28 @@ export default function GPSMap() {
     setViewState({ longitude: dest.longitude, latitude: dest.latitude, zoom: 13 })
     justSelectedRef.current = true
     setSearchQuery(r.dest_name || '')
-    getDirections(dest, {
-      tolls: !!r.avoid_tolls,
-      highways: !!r.avoid_highways,
-      cams: !!r.avoid_cams,
-      wps,
-    })
+
+    // Wait for a GPS fix if one isn't ready yet - otherwise the call silently fails
+    let loc = userLocation
+    if (!loc && navigator.geolocation) {
+      loc = await new Promise<{ longitude: number; latitude: number } | null>((resolve) => {
+        navigator.geolocation.getCurrentPosition(
+          (p) => resolve({ longitude: p.coords.longitude, latitude: p.coords.latitude }),
+          () => resolve(null),
+          { timeout: 8000 }
+        )
+      })
+      if (loc) setUserLocation(loc)
+    }
+    if (loc) {
+      getDirections(dest, {
+        tolls: !!r.avoid_tolls,
+        highways: !!r.avoid_highways,
+        cams: !!r.avoid_cams,
+        wps,
+        from: loc,
+      })
+    }
   }
 
   const deleteSavedRoute = async (id: number) => {
@@ -260,9 +465,10 @@ export default function GPSMap() {
   // Get directions - optionally iteratively re-route to avoid cameras on the path
   const getDirections = async (
     dest: { longitude: number; latitude: number },
-    opts?: { tolls: boolean; highways: boolean; cams: boolean; wps?: { longitude: number; latitude: number }[] }
+    opts?: { tolls: boolean; highways: boolean; cams: boolean; wps?: { longitude: number; latitude: number }[]; from?: { longitude: number; latitude: number } }
   ) => {
-    if (!userLocation || !MAPBOX_TOKEN) return
+    const origin = opts?.from ?? userLocation
+    if (!origin || !MAPBOX_TOKEN) return
 
     const tolls = opts?.tolls ?? avoidTolls
     const highways = opts?.highways ?? avoidHighways
@@ -275,7 +481,7 @@ export default function GPSMap() {
       return parts.length ? '&exclude=' + parts.join(',') : ''
     }
 
-    const coords = [userLocation, ...wps, dest].map((p) => `${p.longitude},${p.latitude}`).join(';')
+    const coords = [origin, ...wps, dest].map((p) => `${p.longitude},${p.latitude}`).join(';')
     // alternatives only supported on 2-point routes
     const alt = wps.length === 0 ? '&alternatives=true' : ''
     const url = (exclude: string) =>
@@ -342,32 +548,31 @@ export default function GPSMap() {
 
         route = best
         const remaining = score(route)
-        setCamsOnRoute(remaining)
         if (remaining === 0) {
           speak('Camera-free route set')
         } else {
           speak(`Warning: no camera-free route found. Route passes ${remaining} camera${remaining > 1 ? 's' : ''}`)
         }
-      } else {
-        setCamsOnRoute(null)
       }
+
+      // Always show the camera count on whatever route we end up with
+      setCamsOnRoute(score(route))
 
       setRoute(route)
       const steps = route.legs.flatMap((leg: any) => leg.steps || [])
       setDirections(steps)
       setShowSteps(false)
-      stepIdxRef.current = 0
-      announcedRef.current = -1
+      announcedRef.current = null
       // Lock camera onto user once navigation starts, like Google Maps
       // (skip while custom-planning so waypoint taps don't yank the camera)
       if (!customMode) {
         setFollow(true)
-        setViewState({ longitude: userLocation.longitude, latitude: userLocation.latitude, zoom: 16 })
+        setViewState({ longitude: origin.longitude, latitude: origin.latitude, zoom: 16 })
       }
       // Announce first instruction (also unlocks speech on iOS, since this runs after a tap)
       if (steps[0]?.maneuver?.instruction) {
         speak(steps[0].maneuver.instruction)
-        announcedRef.current = 0
+        announcedRef.current = steps[0]
       }
     } catch (error) {
       console.error('Error getting directions:', error)
@@ -414,8 +619,7 @@ export default function GPSMap() {
     setShowSteps(false)
     setSaving(false)
     setCamsOnRoute(null)
-    stepIdxRef.current = 0
-    announcedRef.current = -1
+    announcedRef.current = null
     if ('speechSynthesis' in window) window.speechSynthesis.cancel()
   }
 
@@ -498,6 +702,7 @@ export default function GPSMap() {
 
   return (
     <div className="relative w-full h-dvh">
+      <style>{`@keyframes gpsPulse{0%{transform:scale(0.6);opacity:0.8}70%{transform:scale(2.6);opacity:0}100%{transform:scale(2.6);opacity:0}}`}</style>
       <Map
         ref={mapRef}
         {...viewState}
@@ -534,6 +739,10 @@ export default function GPSMap() {
 
           map.addImage('cam-icon', ctx.getImageData(0, 0, size, size))
 
+          const pCanvas = document.createElement('canvas')
+          pCanvas.width = size
+          pCanvas.height = size
+
           map.addSource('traffic-cams', {
             type: 'geojson',
             data: {
@@ -556,6 +765,54 @@ export default function GPSMap() {
               'icon-allow-overlap': true
             }
           })
+
+          // Police badge icon: blue circle with white star
+          const pCtx = pCanvas.getContext('2d')!
+          pCtx.beginPath()
+          pCtx.arc(32, 32, 30, 0, Math.PI * 2)
+          pCtx.fillStyle = '#1d4ed8'
+          pCtx.fill()
+          pCtx.strokeStyle = '#ffffff'
+          pCtx.lineWidth = 3
+          pCtx.stroke()
+          pCtx.fillStyle = '#ffffff'
+          pCtx.beginPath()
+          const cx = 32, cy = 32, spikes = 5, outer = 16, inner = 7
+          let rot = (-Math.PI / 2)
+          const step = Math.PI / spikes
+          pCtx.moveTo(cx, cy - outer)
+          for (let i = 0; i < spikes; i++) {
+            pCtx.lineTo(cx + Math.cos(rot) * outer, cy + Math.sin(rot) * outer)
+            rot += step
+            pCtx.lineTo(cx + Math.cos(rot) * inner, cy + Math.sin(rot) * inner)
+            rot += step
+          }
+          pCtx.closePath()
+          pCtx.fill()
+          map.addImage('police-icon', pCtx.getImageData(0, 0, size, size))
+
+          map.addSource('police-stations', {
+            type: 'geojson',
+            data: {
+              type: 'FeatureCollection',
+              features: POLICE.map(([lng, lat, name]) => ({
+                type: 'Feature',
+                properties: { name },
+                geometry: { type: 'Point', coordinates: [lng, lat] }
+              }))
+            }
+          })
+
+          map.addLayer({
+            id: 'police-stations',
+            type: 'symbol',
+            source: 'police-stations',
+            layout: {
+              'icon-image': 'police-icon',
+              'icon-size': 0.42,
+              'icon-allow-overlap': true
+            }
+          })
         }}
         onMove={(evt) => {
           setViewState(evt.viewState)
@@ -563,24 +820,21 @@ export default function GPSMap() {
           if ((evt as any).originalEvent) setFollow(false)
         }}
         onClick={(evt) => {
+          const f = (evt as any).features?.[0]
+          if (f?.layer?.id === 'police-stations') {
+            setSelPolice({ name: f.properties?.name || 'Police station', lng: evt.lngLat.lng, lat: evt.lngLat.lat })
+            return
+          }
           // Custom route mode: tap the map to steer the route around cameras
           if (customMode && route) addWaypoint(evt.lngLat.lng, evt.lngLat.lat)
         }}
+        interactiveLayerIds={['police-stations']}
         style={{ width: '100%', height: '100%' }}
         cursor={customMode && route ? 'crosshair' : 'grab'}
         mapStyle="mapbox://styles/mapbox/streets-v12"
         mapboxAccessToken={MAPBOX_TOKEN}
       >
-        {/* User location marker */}
-        {userLocation && (
-          <Marker
-            longitude={userLocation.longitude}
-            latitude={userLocation.latitude}
-            anchor="center"
-          >
-            <div className="w-4 h-4 bg-blue-500 rounded-full border-2 border-white shadow-md" />
-          </Marker>
-        )}
+        {/* User location marker is rendered imperatively (see ensureUserMarker) so it glides smoothly */}
 
         {/* Destination pin marker */}
         {destination && (
@@ -615,6 +869,37 @@ export default function GPSMap() {
             </button>
           </Marker>
         ))}
+
+        {/* Live helicopters - rotated by heading, green ring = military */}
+        {helis.map((h) => (
+          <Marker key={h.hex} longitude={h.lon} latitude={h.lat} anchor="center">
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                setSelHeli(h)
+              }}
+              className={`w-8 h-8 rounded-full flex items-center justify-center text-base shadow-md bg-white border-2 ${selHeli?.hex === h.hex ? 'border-blue-600 scale-125' : h.mil ? 'border-green-600' : 'border-gray-400'} ${h.emergency ? 'border-red-600' : ''}`}
+              style={{ transform: `rotate(${(h.track ?? 0) - 270}deg)` }}
+              title={h.name}
+            >
+              🚁
+            </button>
+          </Marker>
+        ))}
+        {/* Police station popup */}
+        {selPolice && (
+          <Popup
+            longitude={selPolice.lng}
+            latitude={selPolice.lat}
+            anchor="bottom"
+            offset={18}
+            closeOnClick={false}
+            onClose={() => setSelPolice(null)}
+            className="text-black"
+          >
+            <div className="text-sm font-medium px-1 py-0.5">{selPolice.name}</div>
+          </Popup>
+        )}
       </Map>
 
       {/* Floating pill search bar */}
@@ -704,6 +989,12 @@ export default function GPSMap() {
             </svg>
             Saved ({savedRoutes.length})
           </button>
+          <button
+            onClick={() => setShowHeliList(!showHeliList)}
+            className={`px-3 py-1.5 rounded-full text-xs font-medium shadow transition-colors ${showHeliList ? 'bg-blue-600 text-white' : 'bg-white text-gray-700'}`}
+          >
+            🚁 Helis ({helis.length})
+          </button>
         </div>
 
         {/* Saved routes dropdown */}
@@ -736,6 +1027,71 @@ export default function GPSMap() {
                 </div>
               ))
             )}
+          </div>
+        )}
+
+        {/* Active helicopters list */}
+        {showHeliList && (
+          <div className="mt-2 bg-white rounded-2xl shadow-lg max-h-56 overflow-y-auto">
+            {helis.length === 0 ? (
+              <div className="px-4 py-4 text-sm text-gray-500">No helicopters broadcasting nearby right now.</div>
+            ) : (
+              helis.map((h) => (
+                <button
+                  key={h.hex}
+                  onClick={() => {
+                    setSelHeli(h)
+                    mapRef.current?.getMap()?.flyTo({ center: [h.lon, h.lat], zoom: Math.max(viewState.zoom, 11) })
+                  }}
+                  className="w-full text-left px-4 py-2.5 hover:bg-gray-100 flex items-center gap-3 border-t border-gray-100 first:border-t-0"
+                >
+                  <span className="text-lg shrink-0">🚁</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-medium text-black truncate">
+                      {h.name}
+                      {h.mil && <span className="ml-1.5 text-[10px] font-semibold bg-green-100 text-green-700 px-1.5 py-0.5 rounded-full align-middle">MIL</span>}
+                      {h.emergency && <span className="ml-1.5 text-[10px] font-semibold bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full align-middle">SOS</span>}
+                    </div>
+                    <div className="text-xs text-gray-500 truncate">
+                      {h.callsign || h.reg || h.hex} · {h.distKm < 10 ? `${h.distKm.toFixed(1)} km` : `${Math.round(h.distKm)} km`} away
+                    </div>
+                  </div>
+                </button>
+              ))
+            )}
+          </div>
+        )}
+
+        {/* Selected helicopter detail card */}
+        {selHeli && (
+          <div className="mt-2 bg-white rounded-2xl shadow-lg px-4 py-3">
+            <div className="flex items-start justify-between">
+              <div className="min-w-0">
+                <div className="text-sm font-bold text-black truncate">{selHeli.name}</div>
+                <div className="text-xs text-gray-500">
+                  {selHeli.mil ? 'Military' : 'Civil'} helicopter{selHeli.type ? ` · ${selHeli.type}` : ''}
+                  {selHeli.emergency ? ` · ⚠ ${selHeli.emergency}` : ''}
+                </div>
+              </div>
+              <button onClick={() => setSelHeli(null)} className="text-gray-400 hover:text-gray-600 p-1 -mr-1">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <path d="M6 6l12 12M18 6L6 18" strokeLinecap="round" />
+                </svg>
+              </button>
+            </div>
+            <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-black">
+              <div><span className="text-gray-500">Callsign</span> {selHeli.callsign || '—'}</div>
+              <div><span className="text-gray-500">Reg</span> {selHeli.reg || '—'}</div>
+              <div><span className="text-gray-500">Altitude</span> {selHeli.alt != null ? `${Math.round(selHeli.alt).toLocaleString()} ft` : '—'}</div>
+              <div><span className="text-gray-500">Speed</span> {selHeli.gs != null ? `${Math.round(selHeli.gs)} kts` : '—'}</div>
+              <div><span className="text-gray-500">Heading</span> {selHeli.track != null ? `${Math.round(selHeli.track)}° ${compass(selHeli.track)}` : '—'}</div>
+              <div><span className="text-gray-500">Squawk</span> {selHeli.squawk || '—'}</div>
+              {userLocation && (
+                <div className="col-span-2">
+                  <span className="text-gray-500">Position</span> {selHeli.distKm.toFixed(1)} km {compass(bearingDeg(userLocation.longitude, userLocation.latitude, selHeli.lon, selHeli.lat))} of you
+                </div>
+              )}
+            </div>
           </div>
         )}
 
