@@ -185,10 +185,15 @@ export default function GPSMap() {
     }
   }
 
-  const loadSavedRoute = (r: any) => {
-    const dest = { longitude: r.dest_lng, latitude: r.dest_lat }
-    const wps = (r.waypoints || []).map((w: any) => ({ longitude: w.longitude, latitude: w.latitude }))
+  const loadSavedRoute = async (r: any) => {
     setShowSaved(false)
+    const dest = { longitude: Number(r.dest_lng), latitude: Number(r.dest_lat) }
+    // JSONB may come back as a string depending on the driver - normalize
+    const raw = typeof r.waypoints === 'string' ? JSON.parse(r.waypoints) : r.waypoints || []
+    const wps = (Array.isArray(raw) ? raw : []).map((w: any) => ({
+      longitude: Number(w.longitude),
+      latitude: Number(w.latitude),
+    }))
     setDestination(dest)
     setWaypoints(wps)
     setAvoidTolls(!!r.avoid_tolls)
@@ -198,12 +203,28 @@ export default function GPSMap() {
     setViewState({ longitude: dest.longitude, latitude: dest.latitude, zoom: 13 })
     justSelectedRef.current = true
     setSearchQuery(r.dest_name || '')
-    getDirections(dest, {
-      tolls: !!r.avoid_tolls,
-      highways: !!r.avoid_highways,
-      cams: !!r.avoid_cams,
-      wps,
-    })
+
+    // Wait for a GPS fix if one isn't ready yet - otherwise the call silently fails
+    let loc = userLocation
+    if (!loc && navigator.geolocation) {
+      loc = await new Promise<{ longitude: number; latitude: number } | null>((resolve) => {
+        navigator.geolocation.getCurrentPosition(
+          (p) => resolve({ longitude: p.coords.longitude, latitude: p.coords.latitude }),
+          () => resolve(null),
+          { timeout: 8000 }
+        )
+      })
+      if (loc) setUserLocation(loc)
+    }
+    if (loc) {
+      getDirections(dest, {
+        tolls: !!r.avoid_tolls,
+        highways: !!r.avoid_highways,
+        cams: !!r.avoid_cams,
+        wps,
+        from: loc,
+      })
+    }
   }
 
   const deleteSavedRoute = async (id: number) => {
@@ -260,9 +281,10 @@ export default function GPSMap() {
   // Get directions - optionally iteratively re-route to avoid cameras on the path
   const getDirections = async (
     dest: { longitude: number; latitude: number },
-    opts?: { tolls: boolean; highways: boolean; cams: boolean; wps?: { longitude: number; latitude: number }[] }
+    opts?: { tolls: boolean; highways: boolean; cams: boolean; wps?: { longitude: number; latitude: number }[]; from?: { longitude: number; latitude: number } }
   ) => {
-    if (!userLocation || !MAPBOX_TOKEN) return
+    const origin = opts?.from ?? userLocation
+    if (!origin || !MAPBOX_TOKEN) return
 
     const tolls = opts?.tolls ?? avoidTolls
     const highways = opts?.highways ?? avoidHighways
@@ -275,7 +297,7 @@ export default function GPSMap() {
       return parts.length ? '&exclude=' + parts.join(',') : ''
     }
 
-    const coords = [userLocation, ...wps, dest].map((p) => `${p.longitude},${p.latitude}`).join(';')
+    const coords = [origin, ...wps, dest].map((p) => `${p.longitude},${p.latitude}`).join(';')
     // alternatives only supported on 2-point routes
     const alt = wps.length === 0 ? '&alternatives=true' : ''
     const url = (exclude: string) =>
@@ -342,15 +364,15 @@ export default function GPSMap() {
 
         route = best
         const remaining = score(route)
-        setCamsOnRoute(remaining)
         if (remaining === 0) {
           speak('Camera-free route set')
         } else {
           speak(`Warning: no camera-free route found. Route passes ${remaining} camera${remaining > 1 ? 's' : ''}`)
         }
-      } else {
-        setCamsOnRoute(null)
       }
+
+      // Always show the camera count on whatever route we end up with
+      setCamsOnRoute(score(route))
 
       setRoute(route)
       const steps = route.legs.flatMap((leg: any) => leg.steps || [])
@@ -362,7 +384,7 @@ export default function GPSMap() {
       // (skip while custom-planning so waypoint taps don't yank the camera)
       if (!customMode) {
         setFollow(true)
-        setViewState({ longitude: userLocation.longitude, latitude: userLocation.latitude, zoom: 16 })
+        setViewState({ longitude: origin.longitude, latitude: origin.latitude, zoom: 16 })
       }
       // Announce first instruction (also unlocks speech on iOS, since this runs after a tap)
       if (steps[0]?.maneuver?.instruction) {
