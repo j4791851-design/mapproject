@@ -244,10 +244,11 @@ export default function GPSMap() {
     }
   }, [])
 
-  // Keep the screen awake while navigating (stops phone from dimming/locking)
+  // Keep the screen awake the whole time the site is open (stops phone
+  // screen timeout/dimming, not just during navigation)
   useEffect(() => {
     const nav = navigator as any
-    if (!('wakeLock' in nav) || !route) return
+    if (!('wakeLock' in nav)) return
     let lock: any = null
 
     const request = async () => {
@@ -260,14 +261,20 @@ export default function GPSMap() {
       // wake lock auto-releases when tab hidden - re-grab on return
       if (document.visibilityState === 'visible') request()
     }
+    // Some browsers only grant wake lock after a user gesture - retry on first touch
+    const onGesture = () => {
+      if (!lock || lock.released) request()
+    }
 
     request()
     document.addEventListener('visibilitychange', reacquire)
+    document.addEventListener('pointerdown', onGesture)
     return () => {
       document.removeEventListener('visibilitychange', reacquire)
+      document.removeEventListener('pointerdown', onGesture)
       lock?.release?.().catch(() => {})
     }
-  }, [route])
+  }, [])
 
   // Load saved routes once (user is always signed in past the AuthGate)
   useEffect(() => {
