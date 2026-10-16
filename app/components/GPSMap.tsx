@@ -6,6 +6,17 @@ import 'mapbox-gl/dist/mapbox-gl.css'
 
 const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || ''
 
+// Distance in meters between two [lng, lat] points (haversine)
+const distMeters = (aLng: number, aLat: number, bLng: number, bLat: number) => {
+  const R = 6371000
+  const dLat = ((bLat - aLat) * Math.PI) / 180
+  const dLng = ((bLng - aLng) * Math.PI) / 180
+  const s =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((aLat * Math.PI) / 180) * Math.cos((bLat * Math.PI) / 180) * Math.sin(dLng / 2) ** 2
+  return 2 * R * Math.asin(Math.sqrt(s))
+}
+
 export default function GPSMap() {
   const [viewState, setViewState] = useState({
     longitude: -122.4194,
@@ -20,11 +31,28 @@ export default function GPSMap() {
   const [directions, setDirections] = useState<any[]>([])
   const [showSteps, setShowSteps] = useState(false)
   const [follow, setFollow] = useState(false)
+  const [voiceOn, setVoiceOn] = useState(true)
   const mapRef = useRef<any>(null)
   const followRef = useRef(false)
+  const voiceRef = useRef(true)
+  const stepIdxRef = useRef(0)
+  const announcedRef = useRef(-1)
+  const stepsRef = useRef<any[]>([])
 
-  // Keep followRef in sync so watchPosition callback can read latest value
+  // Keep refs in sync so geolocation callback can read latest values
   followRef.current = follow
+  voiceRef.current = voiceOn
+  stepsRef.current = directions
+
+  // Speak a navigation instruction
+  const speak = (text: string) => {
+    if (!voiceRef.current || !('speechSynthesis' in window)) return
+    const synth = window.speechSynthesis
+    synth.cancel()
+    const utterance = new SpeechSynthesisUtterance(text)
+    utterance.rate = 1
+    synth.speak(utterance)
+  }
 
   // Get user's current location
   useEffect(() => {
@@ -54,6 +82,24 @@ export default function GPSMap() {
               map.easeTo({ center: [longitude, latitude], duration: 500 })
             } else {
               setViewState((vs) => ({ ...vs, longitude, latitude }))
+            }
+          }
+
+          // Voice guidance: announce instruction when approaching its maneuver point
+          const steps = stepsRef.current
+          const idx = stepIdxRef.current
+          const next = steps[idx]
+          if (next?.maneuver?.location) {
+            const [mLng, mLat] = next.maneuver.location
+            const d = distMeters(longitude, latitude, mLng, mLat)
+            if (d < 50 && announcedRef.current !== idx) {
+              announcedRef.current = idx
+              const text = next.maneuver?.instruction || 'Continue'
+              speak(`In ${Math.round(d)} meters, ${text}`)
+            }
+            if (d < 12 && steps[idx + 1]) {
+              // Passed the maneuver - advance to next step
+              stepIdxRef.current = idx + 1
             }
           }
         },
@@ -93,11 +139,19 @@ export default function GPSMap() {
 
       if (data.routes && data.routes.length > 0) {
         setRoute(data.routes[0])
-        setDirections(data.routes[0].legs[0].steps || [])
+        const steps = data.routes[0].legs[0].steps || []
+        setDirections(steps)
         setShowSteps(false)
+        stepIdxRef.current = 0
+        announcedRef.current = -1
         // Lock camera onto user once navigation starts, like Google Maps
         setFollow(true)
         setViewState({ longitude: userLocation.longitude, latitude: userLocation.latitude, zoom: 16 })
+        // Announce first instruction (also unlocks speech on iOS, since this runs after a tap)
+        if (steps[0]?.maneuver?.instruction) {
+          speak(steps[0].maneuver.instruction)
+          announcedRef.current = 0
+        }
       }
     } catch (error) {
       console.error('Error getting directions:', error)
@@ -123,6 +177,9 @@ export default function GPSMap() {
     setDirections([])
     setDestination(null)
     setShowSteps(false)
+    stepIdxRef.current = 0
+    announcedRef.current = -1
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel()
   }
 
   // Target button: re-center on user and re-enable follow mode
@@ -305,6 +362,27 @@ export default function GPSMap() {
                   <span className="text-gray-500 text-sm">{distKm} km</span>
                 </div>
                 <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => {
+                      const next = !voiceOn
+                      setVoiceOn(next)
+                      if (!next && 'speechSynthesis' in window) window.speechSynthesis.cancel()
+                    }}
+                    className="text-gray-500 hover:text-gray-700 p-1"
+                    aria-label={voiceOn ? 'Mute voice guidance' : 'Unmute voice guidance'}
+                  >
+                    {voiceOn ? (
+                      <svg className="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                        <path d="M11 5 6 9H2v6h4l5 4V5z" strokeLinejoin="round" />
+                        <path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13" strokeLinecap="round" />
+                      </svg>
+                    ) : (
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                        <path d="M11 5 6 9H2v6h4l5 4V5z" strokeLinejoin="round" />
+                        <path d="m22 9-6 6M16 9l6 6" strokeLinecap="round" />
+                      </svg>
+                    )}
+                  </button>
                   <button
                     onClick={() => setShowSteps(!showSteps)}
                     className="text-xs text-blue-600 font-medium px-2 py-1"
