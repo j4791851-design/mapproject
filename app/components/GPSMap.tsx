@@ -36,6 +36,7 @@ export default function GPSMap() {
   const [camsOnRoute, setCamsOnRoute] = useState<number | null>(null)
   const [avoidTolls, setAvoidTolls] = useState(false)
   const [avoidHighways, setAvoidHighways] = useState(false)
+  const [avoidCams, setAvoidCams] = useState(false)
   const mapRef = useRef<any>(null)
   const followRef = useRef(false)
   const voiceRef = useRef(true)
@@ -139,15 +140,16 @@ export default function GPSMap() {
     )
   }
 
-  // Get directions - iteratively re-route to avoid cameras on the path (up to 3 attempts, 50 point limit)
+  // Get directions - optionally iteratively re-route to avoid cameras on the path
   const getDirections = async (
     dest: { longitude: number; latitude: number },
-    opts?: { tolls: boolean; highways: boolean }
+    opts?: { tolls: boolean; highways: boolean; cams: boolean }
   ) => {
     if (!userLocation || !MAPBOX_TOKEN) return
 
     const tolls = opts?.tolls ?? avoidTolls
     const highways = opts?.highways ?? avoidHighways
+    const camsStrict = opts?.cams ?? avoidCams
     const classes = [tolls ? 'toll' : '', highways ? 'motorway' : ''].filter(Boolean)
 
     const buildExclude = (pts: [number, number][]) => {
@@ -164,36 +166,53 @@ export default function GPSMap() {
       let route = data.routes?.[0]
       if (!route) return
 
-      const excludedKeys = new Set<string>()
-      const excludedPts: [number, number][] = []
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const cams = camsNearRoute(route)
-        const fresh = cams.filter(([lng, lat]) => !excludedKeys.has(`${lng},${lat}`))
-        if (fresh.length === 0 || excludedPts.length >= 50) break
+      if (camsStrict) {
+        const excludedKeys = new Set<string>()
+        const excludedPts: [number, number][] = []
+        let addedMotorway = false
 
-        for (const [lng, lat] of fresh.slice(0, 50 - excludedPts.length)) {
-          excludedKeys.add(`${lng},${lat}`)
-          excludedPts.push([lng, lat])
-        }
+        for (let attempt = 0; attempt < 5; attempt++) {
+          const cams = camsNearRoute(route, 200)
+          const fresh = cams.filter(([lng, lat]) => !excludedKeys.has(`${lng},${lat}`))
+          if (fresh.length === 0) break
 
-        const exclude = buildExclude(excludedPts)
-        try {
-          const res2 = await fetch(url(exclude))
-          const data2 = await res2.json()
-          if (data2.routes?.[0]) {
-            route = data2.routes[0]
-          } else {
+          if (excludedPts.length >= 50) {
+            // Exclusion point limit hit - last resort: also drop motorways where most cams live
+            if (!addedMotorway && !classes.includes('motorway')) {
+              classes.push('motorway')
+              addedMotorway = true
+              continue
+            }
             break
           }
-        } catch {
-          break
-        }
-      }
 
-      const remaining = camsNearRoute(route)
-      setCamsOnRoute(remaining.length)
-      if (remaining.length === 0 && excludedPts.length > 0) {
-        speak(`Route set, avoiding ${excludedPts.length} traffic cameras`)
+          for (const [lng, lat] of fresh.slice(0, 50 - excludedPts.length)) {
+            excludedKeys.add(`${lng},${lat}`)
+            excludedPts.push([lng, lat])
+          }
+
+          try {
+            const res2 = await fetch(url(buildExclude(excludedPts)))
+            const data2 = await res2.json()
+            if (data2.routes?.[0]) {
+              route = data2.routes[0]
+            } else {
+              break
+            }
+          } catch {
+            break
+          }
+        }
+
+        const remaining = camsNearRoute(route)
+        setCamsOnRoute(remaining.length)
+        if (remaining.length === 0 && excludedPts.length > 0) {
+          speak(`Route set, avoiding ${excludedPts.length} traffic cameras`)
+        } else if (remaining.length > 0) {
+          speak(`Warning: route passes ${remaining.length} traffic camera${remaining.length > 1 ? 's' : ''}`)
+        }
+      } else {
+        setCamsOnRoute(null)
       }
 
       setRoute(route)
@@ -225,7 +244,7 @@ export default function GPSMap() {
     setViewState({ longitude: lng, latitude: lat, zoom: 15 })
     setSearchResults([])
     setSearchQuery(result.place_name)
-    getDirections(dest)
+    getDirections(dest, { tolls: avoidTolls, highways: avoidHighways, cams: avoidCams })
   }
 
   // Clear route and reset navigation
@@ -432,12 +451,12 @@ export default function GPSMap() {
         </div>
 
         {/* Route option toggles */}
-        <div className="mt-2 flex gap-2">
+        <div className="mt-2 flex gap-2 flex-wrap">
           <button
             onClick={() => {
               const next = !avoidTolls
               setAvoidTolls(next)
-              if (destination) getDirections(destination, { tolls: next, highways: avoidHighways })
+              if (destination) getDirections(destination, { tolls: next, highways: avoidHighways, cams: avoidCams })
             }}
             className={`px-3 py-1.5 rounded-full text-xs font-medium shadow transition-colors ${avoidTolls ? 'bg-blue-600 text-white' : 'bg-white text-gray-700'}`}
           >
@@ -447,11 +466,21 @@ export default function GPSMap() {
             onClick={() => {
               const next = !avoidHighways
               setAvoidHighways(next)
-              if (destination) getDirections(destination, { tolls: avoidTolls, highways: next })
+              if (destination) getDirections(destination, { tolls: avoidTolls, highways: next, cams: avoidCams })
             }}
             className={`px-3 py-1.5 rounded-full text-xs font-medium shadow transition-colors ${avoidHighways ? 'bg-blue-600 text-white' : 'bg-white text-gray-700'}`}
           >
             Avoid highways
+          </button>
+          <button
+            onClick={() => {
+              const next = !avoidCams
+              setAvoidCams(next)
+              if (destination) getDirections(destination, { tolls: avoidTolls, highways: avoidHighways, cams: next })
+            }}
+            className={`px-3 py-1.5 rounded-full text-xs font-medium shadow transition-colors ${avoidCams ? 'bg-amber-500 text-white' : 'bg-white text-gray-700'}`}
+          >
+            0 cams
           </button>
         </div>
 
