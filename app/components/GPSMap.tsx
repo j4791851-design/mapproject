@@ -33,6 +33,9 @@ export default function GPSMap() {
   const [showSteps, setShowSteps] = useState(false)
   const [follow, setFollow] = useState(false)
   const [voiceOn, setVoiceOn] = useState(true)
+  const [camsOnRoute, setCamsOnRoute] = useState<number | null>(null)
+  const [avoidTolls, setAvoidTolls] = useState(false)
+  const [avoidHighways, setAvoidHighways] = useState(false)
   const mapRef = useRef<any>(null)
   const followRef = useRef(false)
   const voiceRef = useRef(true)
@@ -128,37 +131,69 @@ export default function GPSMap() {
     }
   }
 
-  // Get directions - first pass normal route, then re-route avoiding cameras near the path
-  const getDirections = async (dest: { longitude: number; latitude: number }) => {
+  // Count cameras near a route polyline
+  const camsNearRoute = (r: any, radius = 150) => {
+    const coords: [number, number][] = r.geometry.coordinates
+    return CAMERAS.filter(([lng, lat]) =>
+      coords.some(([cLng, cLat]) => distMeters(lng, lat, cLng, cLat) < radius)
+    )
+  }
+
+  // Get directions - iteratively re-route to avoid cameras on the path (up to 3 attempts, 50 point limit)
+  const getDirections = async (
+    dest: { longitude: number; latitude: number },
+    opts?: { tolls: boolean; highways: boolean }
+  ) => {
     if (!userLocation || !MAPBOX_TOKEN) return
+
+    const tolls = opts?.tolls ?? avoidTolls
+    const highways = opts?.highways ?? avoidHighways
+    const classes = [tolls ? 'toll' : '', highways ? 'motorway' : ''].filter(Boolean)
+
+    const buildExclude = (pts: [number, number][]) => {
+      const parts = [...classes, ...pts.map(([lng, lat]) => `point(${lng} ${lat})`)]
+      return parts.length ? '&exclude=' + parts.join(',') : ''
+    }
 
     const url = (exclude: string) =>
       `https://api.mapbox.com/directions/v5/mapbox/driving/${userLocation.longitude},${userLocation.latitude};${dest.longitude},${dest.latitude}?steps=true&geometries=geojson${exclude}&access_token=${MAPBOX_TOKEN}`
 
     try {
-      const res = await fetch(url(''))
+      const res = await fetch(url(buildExclude([])))
       const data = await res.json()
       let route = data.routes?.[0]
       if (!route) return
 
-      // Find cameras within ~120m of the route polyline (max 50 excluded points allowed by Mapbox)
-      const coords: [number, number][] = route.geometry.coordinates
-      const near = CAMERAS.filter(([lng, lat]) =>
-        coords.some(([cLng, cLat]) => distMeters(lng, lat, cLng, cLat) < 120)
-      ).slice(0, 50)
+      const excludedKeys = new Set<string>()
+      const excludedPts: [number, number][] = []
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const cams = camsNearRoute(route)
+        const fresh = cams.filter(([lng, lat]) => !excludedKeys.has(`${lng},${lat}`))
+        if (fresh.length === 0 || excludedPts.length >= 50) break
 
-      if (near.length > 0) {
-        const exclude = '&exclude=' + near.map(([lng, lat]) => `point(${lng} ${lat})`).join(',')
+        for (const [lng, lat] of fresh.slice(0, 50 - excludedPts.length)) {
+          excludedKeys.add(`${lng},${lat}`)
+          excludedPts.push([lng, lat])
+        }
+
+        const exclude = buildExclude(excludedPts)
         try {
           const res2 = await fetch(url(exclude))
           const data2 = await res2.json()
           if (data2.routes?.[0]) {
             route = data2.routes[0]
-            speak(`Route set, avoiding ${near.length} traffic camera${near.length > 1 ? 's' : ''}`)
+          } else {
+            break
           }
         } catch {
-          // keep original route if exclusion request fails
+          break
         }
+      }
+
+      const remaining = camsNearRoute(route)
+      setCamsOnRoute(remaining.length)
+      if (remaining.length === 0 && excludedPts.length > 0) {
+        speak(`Route set, avoiding ${excludedPts.length} traffic cameras`)
       }
 
       setRoute(route)
@@ -199,6 +234,7 @@ export default function GPSMap() {
     setDirections([])
     setDestination(null)
     setShowSteps(false)
+    setCamsOnRoute(null)
     stepIdxRef.current = 0
     announcedRef.current = -1
     if ('speechSynthesis' in window) window.speechSynthesis.cancel()
@@ -395,6 +431,30 @@ export default function GPSMap() {
           </button>
         </div>
 
+        {/* Route option toggles */}
+        <div className="mt-2 flex gap-2">
+          <button
+            onClick={() => {
+              const next = !avoidTolls
+              setAvoidTolls(next)
+              if (destination) getDirections(destination, { tolls: next, highways: avoidHighways })
+            }}
+            className={`px-3 py-1.5 rounded-full text-xs font-medium shadow transition-colors ${avoidTolls ? 'bg-blue-600 text-white' : 'bg-white text-gray-700'}`}
+          >
+            Avoid tolls
+          </button>
+          <button
+            onClick={() => {
+              const next = !avoidHighways
+              setAvoidHighways(next)
+              if (destination) getDirections(destination, { tolls: avoidTolls, highways: next })
+            }}
+            className={`px-3 py-1.5 rounded-full text-xs font-medium shadow transition-colors ${avoidHighways ? 'bg-blue-600 text-white' : 'bg-white text-gray-700'}`}
+          >
+            Avoid highways
+          </button>
+        </div>
+
         {/* Search Results dropdown */}
         {searchResults.length > 0 && (
           <div className="mt-2 bg-white rounded-2xl shadow-lg max-h-72 overflow-y-auto">
@@ -438,6 +498,11 @@ export default function GPSMap() {
                 <div className="flex items-center gap-3">
                   <span className="text-green-700 font-bold text-lg">{etaMin} min</span>
                   <span className="text-gray-500 text-sm">{distKm} km</span>
+                  {camsOnRoute !== null && (
+                    <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${camsOnRoute === 0 ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
+                      {camsOnRoute === 0 ? 'No cams' : `${camsOnRoute} cam${camsOnRoute > 1 ? 's' : ''} on route`}
+                    </span>
+                  )}
                 </div>
                 <div className="flex items-center gap-1">
                   <button
