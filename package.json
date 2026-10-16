@@ -9,9 +9,9 @@
     "lint": "eslint"
   },
   "dependencies": {
-    "firebase": "^13.0.0",
     "mapbox-gl": "^3.7.0",
     "next": "16.4.2",
+    "postgres": "^3.4.9",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "react-map-gl": "^8.1.3"
