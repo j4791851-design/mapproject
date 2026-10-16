@@ -37,6 +37,8 @@ export default function GPSMap() {
   const [avoidTolls, setAvoidTolls] = useState(false)
   const [avoidHighways, setAvoidHighways] = useState(false)
   const [avoidCams, setAvoidCams] = useState(false)
+  const [customMode, setCustomMode] = useState(false)
+  const [waypoints, setWaypoints] = useState<{ longitude: number; latitude: number }[]>([])
   const mapRef = useRef<any>(null)
   const followRef = useRef(false)
   const voiceRef = useRef(true)
@@ -147,13 +149,14 @@ export default function GPSMap() {
   // Get directions - optionally iteratively re-route to avoid cameras on the path
   const getDirections = async (
     dest: { longitude: number; latitude: number },
-    opts?: { tolls: boolean; highways: boolean; cams: boolean }
+    opts?: { tolls: boolean; highways: boolean; cams: boolean; wps?: { longitude: number; latitude: number }[] }
   ) => {
     if (!userLocation || !MAPBOX_TOKEN) return
 
     const tolls = opts?.tolls ?? avoidTolls
     const highways = opts?.highways ?? avoidHighways
     const camsStrict = opts?.cams ?? avoidCams
+    const wps = opts?.wps ?? waypoints
     const classes = [tolls ? 'toll' : '', highways ? 'motorway' : ''].filter(Boolean)
 
     const buildExclude = (pts: [number, number][]) => {
@@ -161,8 +164,11 @@ export default function GPSMap() {
       return parts.length ? '&exclude=' + parts.join(',') : ''
     }
 
+    const coords = [userLocation, ...wps, dest].map((p) => `${p.longitude},${p.latitude}`).join(';')
+    // alternatives only supported on 2-point routes
+    const alt = wps.length === 0 ? '&alternatives=true' : ''
     const url = (exclude: string) =>
-      `https://api.mapbox.com/directions/v5/mapbox/driving/${userLocation.longitude},${userLocation.latitude};${dest.longitude},${dest.latitude}?steps=true&geometries=geojson&overview=full&alternatives=true${exclude}&access_token=${MAPBOX_TOKEN}`
+      `https://api.mapbox.com/directions/v5/mapbox/driving/${coords}?steps=true&geometries=geojson&overview=full${alt}${exclude}&access_token=${MAPBOX_TOKEN}`
 
     const score = (r: any) => camsOnPath(r).length
 
@@ -236,7 +242,7 @@ export default function GPSMap() {
       }
 
       setRoute(route)
-      const steps = route.legs[0].steps || []
+      const steps = route.legs.flatMap((leg: any) => leg.steps || [])
       setDirections(steps)
       setShowSteps(false)
       stepIdxRef.current = 0
@@ -260,11 +266,27 @@ export default function GPSMap() {
     if (lng == null || lat == null) return
     const dest = { longitude: lng, latitude: lat }
     setDestination(dest)
+    setWaypoints([])
     setFollow(false)
     setViewState({ longitude: lng, latitude: lat, zoom: 15 })
     setSearchResults([])
     setSearchQuery(result.place_name)
-    getDirections(dest, { tolls: avoidTolls, highways: avoidHighways, cams: avoidCams })
+    getDirections(dest, { tolls: avoidTolls, highways: avoidHighways, cams: avoidCams, wps: [] })
+  }
+
+  // Add a custom waypoint on the route (custom mode tap)
+  const addWaypoint = (longitude: number, latitude: number) => {
+    if (!destination || waypoints.length >= 23) return // Mapbox caps at 25 coords total
+    const wps = [...waypoints, { longitude, latitude }]
+    setWaypoints(wps)
+    getDirections(destination, { tolls: avoidTolls, highways: avoidHighways, cams: avoidCams, wps })
+  }
+
+  const undoWaypoint = () => {
+    if (!destination || waypoints.length === 0) return
+    const wps = waypoints.slice(0, -1)
+    setWaypoints(wps)
+    getDirections(destination, { tolls: avoidTolls, highways: avoidHighways, cams: avoidCams, wps })
   }
 
   // Clear route and reset navigation
@@ -272,6 +294,8 @@ export default function GPSMap() {
     setRoute(null)
     setDirections([])
     setDestination(null)
+    setWaypoints([])
+    setCustomMode(false)
     setShowSteps(false)
     setCamsOnRoute(null)
     stepIdxRef.current = 0
@@ -422,7 +446,12 @@ export default function GPSMap() {
           // User panned/zoomed manually -> stop following
           if ((evt as any).originalEvent) setFollow(false)
         }}
+        onClick={(evt) => {
+          // Custom route mode: tap the map to steer the route around cameras
+          if (customMode && route) addWaypoint(evt.lngLat.lng, evt.lngLat.lat)
+        }}
         style={{ width: '100%', height: '100%' }}
+        cursor={customMode && route ? 'crosshair' : 'grab'}
         mapStyle="mapbox://styles/mapbox/streets-v12"
         mapboxAccessToken={MAPBOX_TOKEN}
       >
@@ -453,6 +482,23 @@ export default function GPSMap() {
             </svg>
           </Marker>
         )}
+
+        {/* Custom waypoints - numbered dots, tap-to-remove */}
+        {waypoints.map((wp, i) => (
+          <Marker key={`${wp.longitude},${wp.latitude},${i}`} longitude={wp.longitude} latitude={wp.latitude} anchor="center">
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                const wps = waypoints.filter((_, j) => j !== i)
+                setWaypoints(wps)
+                if (destination) getDirections(destination, { tolls: avoidTolls, highways: avoidHighways, cams: avoidCams, wps })
+              }}
+              className="w-7 h-7 rounded-full bg-blue-600 border-2 border-white shadow-md text-white text-xs font-bold flex items-center justify-center"
+            >
+              {i + 1}
+            </button>
+          </Marker>
+        ))}
       </Map>
 
       {/* Floating pill search bar */}
@@ -520,7 +566,34 @@ export default function GPSMap() {
           >
             0 cams
           </button>
+          {route && (
+            <button
+              onClick={() => {
+                const next = !customMode
+                setCustomMode(next)
+                if (next) setFollow(false) // free the camera so you can plan
+              }}
+              className={`px-3 py-1.5 rounded-full text-xs font-medium shadow transition-colors ${customMode ? 'bg-green-600 text-white' : 'bg-white text-gray-700'}`}
+            >
+              Custom route
+            </button>
+          )}
+          {customMode && waypoints.length > 0 && (
+            <button
+              onClick={undoWaypoint}
+              className="px-3 py-1.5 rounded-full text-xs font-medium shadow bg-white text-gray-700"
+            >
+              Undo point
+            </button>
+          )}
         </div>
+
+        {/* Custom mode hint */}
+        {customMode && route && (
+          <div className="mt-2 bg-green-600 text-white text-xs rounded-full px-4 py-2 shadow">
+            Tap the map to add waypoints — route will snap through them. Tap a numbered dot to remove it.
+          </div>
+        )}
 
         {/* Search Results dropdown */}
         {searchResults.length > 0 && (
