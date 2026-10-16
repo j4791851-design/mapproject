@@ -132,12 +132,16 @@ export default function GPSMap() {
     }
   }
 
-  // Count cameras near a route polyline
-  const camsNearRoute = (r: any, radius = 150) => {
-    const coords: [number, number][] = r.geometry.coordinates
-    return CAMERAS.filter(([lng, lat]) =>
-      coords.some(([cLng, cLat]) => distMeters(lng, lat, cLng, cLat) < radius)
-    )
+  // Cameras within radius of a route, sorted closest-first
+  const camsOnPath = (r: any, radius = 150) => {
+    const coords: number[][] = r.geometry.coordinates
+    return CAMERAS.map(([lng, lat]) => ({
+      lng,
+      lat,
+      d: Math.min(...coords.map(([cLng, cLat]) => distMeters(lng, lat, cLng, cLat)))
+    }))
+      .filter((c) => c.d < radius)
+      .sort((a, b) => a.d - b.d)
   }
 
   // Get directions - optionally iteratively re-route to avoid cameras on the path
@@ -160,20 +164,15 @@ export default function GPSMap() {
     const url = (exclude: string) =>
       `https://api.mapbox.com/directions/v5/mapbox/driving/${userLocation.longitude},${userLocation.latitude};${dest.longitude},${dest.latitude}?steps=true&geometries=geojson&overview=full&alternatives=true${exclude}&access_token=${MAPBOX_TOKEN}`
 
-    const fetchBest = async (exclude: string, maxDuration?: number) => {
+    const score = (r: any) => camsOnPath(r).length
+
+    const fetchBest = async (exclude: string) => {
       const res = await fetch(url(exclude))
       const data = await res.json()
-      let routes: any[] = data.routes || []
+      const routes: any[] = data.routes || []
       if (routes.length === 0) return null
-      // Reject absurd detours (alleys/lots) when a reasonable alternative exists
-      if (maxDuration) {
-        const sane = routes.filter((r) => r.duration <= maxDuration)
-        if (sane.length > 0) routes = sane
-      }
       // prefer fewest cameras, then shortest time
-      return routes.sort(
-        (a, b) => camsNearRoute(a).length - camsNearRoute(b).length || a.duration - b.duration
-      )[0]
+      return routes.sort((a, b) => score(a) - score(b) || a.duration - b.duration)[0]
     }
 
     try {
@@ -181,73 +180,56 @@ export default function GPSMap() {
       if (!route) return
 
       if (camsStrict) {
-        const excludedKeys = new Set<string>()
-        const excludedPts: [number, number][] = []
+        const excluded = new Set<string>()
+        const pts: [number, number][] = []
         let motorwayAdded = classes.includes('motorway')
-        let radius = 200
+        let best = route // track the best route ever seen - never end worse than we started
 
-        // Strict cam mode: no duration limit - try everything to hit 0 cameras
-        for (let attempt = 0; attempt < 10; attempt++) {
-          const cams = camsNearRoute(route, radius)
-          const fresh = cams.filter(([lng, lat]) => !excludedKeys.has(`${lng},${lat}`))
+        for (let attempt = 0; attempt < 8 && score(best) > 0; attempt++) {
+          // Exclude the cams closest to the route first (up to the 50-point cap)
+          const fresh = camsOnPath(route, 200).filter(
+            (c) => !excluded.has(`${c.lng},${c.lat}`)
+          )
 
-          if (fresh.length === 0) {
-            if (camsNearRoute(route).length === 0) break // verified clean
-            // Nothing new to exclude but cams remain - escalate
+          if (fresh.length === 0 || pts.length >= 50) {
+            // Nothing left to exclude within budget - try dropping motorways once
             if (!motorwayAdded) {
               classes.push('motorway')
               motorwayAdded = true
               try {
-                const better = await fetchBest(buildExclude(excludedPts))
-                if (better) route = better
+                const next = await fetchBest(buildExclude(pts))
+                if (next) {
+                  if (score(next) <= score(route)) route = next
+                  if (score(next) < score(best)) best = next
+                }
               } catch {}
               continue
             }
-            if (radius < 500) {
-              radius += 100 // widen the net around the route
-              continue
-            }
-            break // exhausted all options
+            break
           }
 
-          if (excludedPts.length + fresh.length > 50) {
-            // Over the 50-point cap - try motorway exclusion first, then
-            // reprioritize the list to only the cams currently on the route
-            if (!motorwayAdded) {
-              classes.push('motorway')
-              motorwayAdded = true
-              continue
-            }
-            excludedPts.length = 0
-            excludedKeys.clear()
-            for (const [lng, lat] of cams.slice(0, 50)) {
-              excludedKeys.add(`${lng},${lat}`)
-              excludedPts.push([lng, lat])
-            }
-          } else {
-            for (const [lng, lat] of fresh) {
-              excludedKeys.add(`${lng},${lat}`)
-              excludedPts.push([lng, lat])
-            }
+          for (const c of fresh.slice(0, 50 - pts.length)) {
+            excluded.add(`${c.lng},${c.lat}`)
+            pts.push([c.lng, c.lat])
           }
 
           try {
-            const better = await fetchBest(buildExclude(excludedPts))
-            // accept any route that doesn't make things worse - it may shift cams for the next pass
-            if (better && camsNearRoute(better).length <= camsNearRoute(route).length) {
-              route = better
-            }
+            const next = await fetchBest(buildExclude(pts))
+            if (!next) break
+            if (score(next) <= score(route)) route = next // accept non-worse
+            if (score(next) < score(best)) best = next
           } catch {
             break
           }
         }
 
-        const remaining = camsNearRoute(route)
-        setCamsOnRoute(remaining.length)
-        if (remaining.length === 0) {
+        route = best
+        const remaining = score(route)
+        setCamsOnRoute(remaining)
+        if (remaining === 0) {
           speak('Camera-free route set')
         } else {
-          speak(`Warning: no camera-free route found. Route passes ${remaining.length} camera${remaining.length > 1 ? 's' : ''}`)
+          speak(`Warning: no camera-free route found. Route passes ${remaining} camera${remaining > 1 ? 's' : ''}`)
         }
       } else {
         setCamsOnRoute(null)
