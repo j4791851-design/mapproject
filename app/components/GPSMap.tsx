@@ -39,6 +39,10 @@ export default function GPSMap() {
   const [avoidCams, setAvoidCams] = useState(false)
   const [customMode, setCustomMode] = useState(false)
   const [waypoints, setWaypoints] = useState<{ longitude: number; latitude: number }[]>([])
+  const [savedRoutes, setSavedRoutes] = useState<any[]>([])
+  const [showSaved, setShowSaved] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [saveName, setSaveName] = useState('')
   const mapRef = useRef<any>(null)
   const followRef = useRef(false)
   const voiceRef = useRef(true)
@@ -145,6 +149,72 @@ export default function GPSMap() {
     }
   }, [route])
 
+  // Load saved routes once (user is always signed in past the AuthGate)
+  useEffect(() => {
+    fetch('/api/routes')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => d && setSavedRoutes(d.routes || []))
+      .catch(() => {})
+  }, [])
+
+  const saveCurrentRoute = async (name: string) => {
+    if (!destination) return
+    try {
+      const res = await fetch('/api/routes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: name || searchQuery || 'Saved route',
+          destName: searchQuery || 'Destination',
+          destLng: destination.longitude,
+          destLat: destination.latitude,
+          waypoints,
+          avoidTolls,
+          avoidHighways,
+          avoidCams,
+        }),
+      })
+      if (res.ok) {
+        setSaving(false)
+        setSaveName('')
+        const d = await fetch('/api/routes').then((r) => r.json())
+        setSavedRoutes(d.routes || [])
+      }
+    } catch (e) {
+      console.error('Save route failed:', e)
+    }
+  }
+
+  const loadSavedRoute = (r: any) => {
+    const dest = { longitude: r.dest_lng, latitude: r.dest_lat }
+    const wps = (r.waypoints || []).map((w: any) => ({ longitude: w.longitude, latitude: w.latitude }))
+    setShowSaved(false)
+    setDestination(dest)
+    setWaypoints(wps)
+    setAvoidTolls(!!r.avoid_tolls)
+    setAvoidHighways(!!r.avoid_highways)
+    setAvoidCams(!!r.avoid_cams)
+    setFollow(false)
+    setViewState({ longitude: dest.longitude, latitude: dest.latitude, zoom: 13 })
+    justSelectedRef.current = true
+    setSearchQuery(r.dest_name || '')
+    getDirections(dest, {
+      tolls: !!r.avoid_tolls,
+      highways: !!r.avoid_highways,
+      cams: !!r.avoid_cams,
+      wps,
+    })
+  }
+
+  const deleteSavedRoute = async (id: number) => {
+    try {
+      await fetch(`/api/routes/${id}`, { method: 'DELETE' })
+      setSavedRoutes((rs) => rs.filter((r) => r.id !== id))
+    } catch (e) {
+      console.error('Delete route failed:', e)
+    }
+  }
+
   // Live autocomplete search - fires as you type, biased toward your location,
   // covers businesses (POI), addresses, and neighborhoods like Google Maps
   useEffect(() => {
@@ -172,7 +242,8 @@ export default function GPSMap() {
       }
     }, 300)
     return () => clearTimeout(t)
-  }, [searchQuery, userLocation])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- userLocation must not retrigger the search on every GPS tick
+  }, [searchQuery])
 
   // Cameras within radius of a route, sorted closest-first
   const camsOnPath = (r: any, radius = 150) => {
@@ -341,6 +412,7 @@ export default function GPSMap() {
     setWaypoints([])
     setCustomMode(false)
     setShowSteps(false)
+    setSaving(false)
     setCamsOnRoute(null)
     stepIdxRef.current = 0
     announcedRef.current = -1
@@ -623,7 +695,49 @@ export default function GPSMap() {
               Undo point
             </button>
           )}
+          <button
+            onClick={() => setShowSaved(!showSaved)}
+            className={`px-3 py-1.5 rounded-full text-xs font-medium shadow transition-colors flex items-center gap-1 ${showSaved ? 'bg-blue-600 text-white' : 'bg-white text-gray-700'}`}
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path d="M6 3h12v18l-6-4-6 4V3z" strokeLinejoin="round" />
+            </svg>
+            Saved ({savedRoutes.length})
+          </button>
         </div>
+
+        {/* Saved routes dropdown */}
+        {showSaved && (
+          <div className="mt-2 bg-white rounded-2xl shadow-lg max-h-72 overflow-y-auto">
+            {savedRoutes.length === 0 ? (
+              <div className="px-4 py-4 text-sm text-gray-500">No saved routes yet. Set a route, then tap Save.</div>
+            ) : (
+              savedRoutes.map((r) => (
+                <div key={r.id} className="flex items-center border-t border-gray-100 first:border-t-0">
+                  <button
+                    onClick={() => loadSavedRoute(r)}
+                    className="flex-1 text-left px-4 py-3 hover:bg-gray-100 min-w-0"
+                  >
+                    <div className="text-sm font-medium text-black truncate">{r.name}</div>
+                    <div className="text-xs text-gray-500 truncate">
+                      {r.dest_name}
+                      {r.waypoints?.length ? ` · ${r.waypoints.length} waypoint${r.waypoints.length > 1 ? 's' : ''}` : ''}
+                    </div>
+                  </button>
+                  <button
+                    onClick={() => deleteSavedRoute(r.id)}
+                    className="px-3 py-3 text-gray-400 hover:text-red-500 shrink-0"
+                    aria-label="Delete saved route"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                      <path d="M3 6h18M8 6V4h8v2m1 0-1 15H8L7 6" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        )}
 
         {/* Custom mode hint */}
         {customMode && route && (
@@ -670,6 +784,20 @@ export default function GPSMap() {
         )}
       </div>
 
+      {/* Sign out button (top right) */}
+      <button
+        onClick={async () => {
+          await fetch('/api/auth/logout', { method: 'POST' })
+          window.location.reload()
+        }}
+        title="Sign out"
+        className="absolute top-3 right-3 z-20 w-10 h-10 rounded-full shadow-lg bg-white flex items-center justify-center sm:top-4 sm:right-4"
+      >
+        <svg className="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+          <path d="M15 3h4a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1h-4M10 17l5-5-5-5M15 12H3" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+
       {/* Target button - re-center on location (Google Maps style) */}
       <button
         onClick={recenter}
@@ -700,6 +828,12 @@ export default function GPSMap() {
                   )}
                 </div>
                 <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setSaving(!saving)}
+                    className="text-xs text-blue-600 font-medium px-2 py-1"
+                  >
+                    Save
+                  </button>
                   <button
                     onClick={() => {
                       const next = !voiceOn
@@ -738,6 +872,26 @@ export default function GPSMap() {
                   </button>
                 </div>
               </div>
+
+              {/* Save route name input */}
+              {saving && (
+                <div className="mt-2 flex gap-2">
+                  <input
+                    type="text"
+                    value={saveName}
+                    onChange={(e) => setSaveName(e.target.value)}
+                    placeholder={searchQuery || 'Route name'}
+                    className="flex-1 min-w-0 px-3 py-1.5 border border-gray-300 rounded-full text-sm text-black focus:outline-none focus:border-blue-500"
+                    autoFocus
+                  />
+                  <button
+                    onClick={() => saveCurrentRoute(saveName.trim())}
+                    className="px-3 py-1.5 bg-blue-600 text-white text-xs font-medium rounded-full"
+                  >
+                    Save
+                  </button>
+                </div>
+              )}
 
               {/* Next instruction */}
               {nextStep && (
