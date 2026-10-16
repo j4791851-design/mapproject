@@ -3,6 +3,8 @@
 import { useState, useEffect, useRef } from 'react'
 import Map, { Marker, Popup } from 'react-map-gl/mapbox'
 import mapboxgl from 'mapbox-gl'
+// @ts-ignore - no bundled types
+import NoSleep from 'nosleep.js'
 import 'mapbox-gl/dist/mapbox-gl.css'
 import { CAMERAS } from './cameras'
 import { POLICE } from './police'
@@ -244,35 +246,25 @@ export default function GPSMap() {
     }
   }, [])
 
-  // Keep the screen awake the whole time the site is open (stops phone
-  // screen timeout/dimming, not just during navigation)
+  // Keep the screen awake the whole time the site is open. On iOS the Wake
+  // Lock API is unreliable (all iOS browsers are WebKit), so NoSleep also
+  // plays a tiny hidden looping video - the reliable way to block the iPhone
+  // screen timeout. Needs a user gesture to start video -> enable on any tap.
   useEffect(() => {
-    const nav = navigator as any
-    if (!('wakeLock' in nav)) return
-    let lock: any = null
-
-    const request = async () => {
-      try {
-        lock = await nav.wakeLock.request('screen')
-      } catch {}
+    const noSleep = new NoSleep()
+    const enable = () => {
+      try { noSleep.enable() } catch {}
     }
-
     const reacquire = () => {
-      // wake lock auto-releases when tab hidden - re-grab on return
-      if (document.visibilityState === 'visible') request()
+      if (document.visibilityState === 'visible') enable()
     }
-    // Some browsers only grant wake lock after a user gesture - retry on first touch
-    const onGesture = () => {
-      if (!lock || lock.released) request()
-    }
-
-    request()
+    enable()
+    document.addEventListener('pointerdown', enable)
     document.addEventListener('visibilitychange', reacquire)
-    document.addEventListener('pointerdown', onGesture)
     return () => {
+      document.removeEventListener('pointerdown', enable)
       document.removeEventListener('visibilitychange', reacquire)
-      document.removeEventListener('pointerdown', onGesture)
-      lock?.release?.().catch(() => {})
+      try { noSleep.disable() } catch {}
     }
   }, [])
 
