@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from 'react'
 import Map, { Marker } from 'react-map-gl/mapbox'
 import 'mapbox-gl/dist/mapbox-gl.css'
+import { CAMERAS } from './cameras'
 
 const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || ''
 
@@ -127,31 +128,52 @@ export default function GPSMap() {
     }
   }
 
-  // Get directions
+  // Get directions - first pass normal route, then re-route avoiding cameras near the path
   const getDirections = async (dest: { longitude: number; latitude: number }) => {
     if (!userLocation || !MAPBOX_TOKEN) return
 
-    try {
-      const response = await fetch(
-        `https://api.mapbox.com/directions/v5/mapbox/driving/${userLocation.longitude},${userLocation.latitude};${dest.longitude},${dest.latitude}?steps=true&geometries=geojson&access_token=${MAPBOX_TOKEN}`
-      )
-      const data = await response.json()
+    const url = (exclude: string) =>
+      `https://api.mapbox.com/directions/v5/mapbox/driving/${userLocation.longitude},${userLocation.latitude};${dest.longitude},${dest.latitude}?steps=true&geometries=geojson${exclude}&access_token=${MAPBOX_TOKEN}`
 
-      if (data.routes && data.routes.length > 0) {
-        setRoute(data.routes[0])
-        const steps = data.routes[0].legs[0].steps || []
-        setDirections(steps)
-        setShowSteps(false)
-        stepIdxRef.current = 0
-        announcedRef.current = -1
-        // Lock camera onto user once navigation starts, like Google Maps
-        setFollow(true)
-        setViewState({ longitude: userLocation.longitude, latitude: userLocation.latitude, zoom: 16 })
-        // Announce first instruction (also unlocks speech on iOS, since this runs after a tap)
-        if (steps[0]?.maneuver?.instruction) {
-          speak(steps[0].maneuver.instruction)
-          announcedRef.current = 0
+    try {
+      const res = await fetch(url(''))
+      const data = await res.json()
+      let route = data.routes?.[0]
+      if (!route) return
+
+      // Find cameras within ~120m of the route polyline (max 50 excluded points allowed by Mapbox)
+      const coords: [number, number][] = route.geometry.coordinates
+      const near = CAMERAS.filter(([lng, lat]) =>
+        coords.some(([cLng, cLat]) => distMeters(lng, lat, cLng, cLat) < 120)
+      ).slice(0, 50)
+
+      if (near.length > 0) {
+        const exclude = '&exclude=' + near.map(([lng, lat]) => `point(${lng} ${lat})`).join(',')
+        try {
+          const res2 = await fetch(url(exclude))
+          const data2 = await res2.json()
+          if (data2.routes?.[0]) {
+            route = data2.routes[0]
+            speak(`Route set, avoiding ${near.length} traffic camera${near.length > 1 ? 's' : ''}`)
+          }
+        } catch {
+          // keep original route if exclusion request fails
         }
+      }
+
+      setRoute(route)
+      const steps = route.legs[0].steps || []
+      setDirections(steps)
+      setShowSteps(false)
+      stepIdxRef.current = 0
+      announcedRef.current = -1
+      // Lock camera onto user once navigation starts, like Google Maps
+      setFollow(true)
+      setViewState({ longitude: userLocation.longitude, latitude: userLocation.latitude, zoom: 16 })
+      // Announce first instruction (also unlocks speech on iOS, since this runs after a tap)
+      if (steps[0]?.maneuver?.instruction) {
+        speak(steps[0].maneuver.instruction)
+        announcedRef.current = 0
       }
     } catch (error) {
       console.error('Error getting directions:', error)
@@ -246,6 +268,62 @@ export default function GPSMap() {
       <Map
         ref={mapRef}
         {...viewState}
+        onLoad={(e) => {
+          const map = e.target
+
+          // Draw a camera icon onto a canvas and register it
+          const size = 64
+          const canvas = document.createElement('canvas')
+          canvas.width = size
+          canvas.height = size
+          const ctx = canvas.getContext('2d')!
+          // red warning circle
+          ctx.beginPath()
+          ctx.arc(32, 32, 30, 0, Math.PI * 2)
+          ctx.fillStyle = '#f59e0b'
+          ctx.fill()
+          ctx.strokeStyle = '#92400e'
+          ctx.lineWidth = 3
+          ctx.stroke()
+          // camera body
+          ctx.fillStyle = '#1f2937'
+          ctx.fillRect(16, 24, 24, 16)
+          ctx.beginPath()
+          ctx.moveTo(40, 28)
+          ctx.lineTo(50, 22)
+          ctx.lineTo(50, 42)
+          ctx.lineTo(40, 36)
+          ctx.closePath()
+          ctx.fill()
+          // lens
+          ctx.fillStyle = '#9ca3af'
+          ctx.fillRect(20, 29, 6, 6)
+
+          map.addImage('cam-icon', ctx.getImageData(0, 0, size, size))
+
+          map.addSource('traffic-cams', {
+            type: 'geojson',
+            data: {
+              type: 'FeatureCollection',
+              features: CAMERAS.map(([lng, lat, name]) => ({
+                type: 'Feature',
+                properties: { name },
+                geometry: { type: 'Point', coordinates: [lng, lat] }
+              }))
+            }
+          })
+
+          map.addLayer({
+            id: 'traffic-cams',
+            type: 'symbol',
+            source: 'traffic-cams',
+            layout: {
+              'icon-image': 'cam-icon',
+              'icon-size': 0.5,
+              'icon-allow-overlap': true
+            }
+          })
+        }}
         onMove={(evt) => {
           setViewState(evt.viewState)
           // User panned/zoomed manually -> stop following
