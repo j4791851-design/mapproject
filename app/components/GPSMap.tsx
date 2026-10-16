@@ -87,10 +87,11 @@ export default function GPSMap() {
 
   // Select a search result
   const selectResult = (result: any) => {
-    const { center } = result.geometry
-    const dest = { longitude: center[0], latitude: center[1] }
+    const [lng, lat] = result.center ?? result.geometry?.coordinates ?? []
+    if (lng == null || lat == null) return
+    const dest = { longitude: lng, latitude: lat }
     setDestination(dest)
-    setViewState({ longitude: center[0], latitude: center[1], zoom: 15 })
+    setViewState({ longitude: lng, latitude: lat, zoom: 15 })
     setSearchResults([])
     setSearchQuery(result.place_name)
     getDirections(dest)
