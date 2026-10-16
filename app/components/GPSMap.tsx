@@ -158,7 +158,7 @@ export default function GPSMap() {
     }
 
     const url = (exclude: string) =>
-      `https://api.mapbox.com/directions/v5/mapbox/driving/${userLocation.longitude},${userLocation.latitude};${dest.longitude},${dest.latitude}?steps=true&geometries=geojson&alternatives=true${exclude}&access_token=${MAPBOX_TOKEN}`
+      `https://api.mapbox.com/directions/v5/mapbox/driving/${userLocation.longitude},${userLocation.latitude};${dest.longitude},${dest.latitude}?steps=true&geometries=geojson&overview=full&alternatives=true${exclude}&access_token=${MAPBOX_TOKEN}`
 
     const fetchBest = async (exclude: string, maxDuration?: number) => {
       const res = await fetch(url(exclude))
