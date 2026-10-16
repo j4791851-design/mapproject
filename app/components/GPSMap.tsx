@@ -18,7 +18,7 @@ export default function GPSMap() {
   const [destination, setDestination] = useState<{ longitude: number; latitude: number } | null>(null)
   const [route, setRoute] = useState<any>(null)
   const [directions, setDirections] = useState<any[]>([])
-  const [currentStep, setCurrentStep] = useState(0)
+  const [showSteps, setShowSteps] = useState(false)
   const mapRef = useRef<any>(null)
 
   // Get user's current location
@@ -71,14 +71,14 @@ export default function GPSMap() {
 
     try {
       const response = await fetch(
-        `https://api.mapbox.com/directions/v5/mapbox/driving/${userLocation.longitude},${userLocation.latitude};${dest.longitude},${dest.latitude}?steps=true&access_token=${MAPBOX_TOKEN}`
+        `https://api.mapbox.com/directions/v5/mapbox/driving/${userLocation.longitude},${userLocation.latitude};${dest.longitude},${dest.latitude}?steps=true&geometries=geojson&access_token=${MAPBOX_TOKEN}`
       )
       const data = await response.json()
-      
+
       if (data.routes && data.routes.length > 0) {
         setRoute(data.routes[0])
         setDirections(data.routes[0].legs[0].steps || [])
-        setCurrentStep(0)
+        setShowSteps(false)
       }
     } catch (error) {
       console.error('Error getting directions:', error)
@@ -102,20 +102,18 @@ export default function GPSMap() {
     setRoute(null)
     setDirections([])
     setDestination(null)
-    setCurrentStep(0)
+    setShowSteps(false)
   }
 
   // Draw route on map when it changes
   useEffect(() => {
     const map = mapRef.current?.getMap()
     if (map && route) {
-      // Remove existing route layer if it exists
       if (map.getSource('route')) {
         map.removeLayer('route')
         map.removeSource('route')
       }
 
-      // Add route source and layer
       map.addSource('route', {
         type: 'geojson',
         data: {
@@ -134,9 +132,9 @@ export default function GPSMap() {
           'line-cap': 'round'
         },
         paint: {
-          'line-color': '#3887be',
-          'line-width': 5,
-          'line-opacity': 0.75
+          'line-color': '#1a73e8',
+          'line-width': 6,
+          'line-opacity': 0.85
         }
       })
     }
@@ -150,6 +148,10 @@ export default function GPSMap() {
     }
   }, [route])
 
+  const etaMin = route ? Math.round(route.duration / 60) : null
+  const distKm = route ? (route.distance / 1000).toFixed(1) : null
+  const nextStep = directions[0]
+
   return (
     <div className="relative w-full h-dvh">
       <Map
@@ -160,9 +162,9 @@ export default function GPSMap() {
         mapStyle="mapbox://styles/mapbox/streets-v12"
         mapboxAccessToken={MAPBOX_TOKEN}
       >
-        <NavigationControl position="top-right" />
+        <NavigationControl position="bottom-right" showCompass={false} />
         <GeolocateControl
-          position="top-right"
+          position="bottom-right"
           trackUserLocation
           showUserHeading
         />
@@ -174,79 +176,141 @@ export default function GPSMap() {
             latitude={userLocation.latitude}
             anchor="center"
           >
-            <div className="w-4 h-4 bg-blue-500 rounded-full border-2 border-white shadow-lg" />
+            <div className="w-4 h-4 bg-blue-500 rounded-full border-2 border-white shadow-md" />
           </Marker>
         )}
 
-        {/* Destination marker */}
+        {/* Destination pin marker */}
         {destination && (
           <Marker
             longitude={destination.longitude}
             latitude={destination.latitude}
-            anchor="center"
+            anchor="bottom"
           >
-            <div className="w-4 h-4 bg-red-500 rounded-full border-2 border-white shadow-lg" />
+            <svg width="32" height="42" viewBox="0 0 24 34" className="drop-shadow-md">
+              <path
+                d="M12 0C5.4 0 0 5.4 0 12c0 9 12 22 12 22s12-13 12-22c0-6.6-5.4-12-12-12z"
+                fill="#ea4335"
+              />
+              <circle cx="12" cy="12" r="5" fill="white" />
+            </svg>
           </Marker>
         )}
       </Map>
 
-      {/* Search Bar */}
-      <div className="absolute top-4 left-4 right-4 sm:right-auto z-20">
-        <div className="bg-white rounded-lg shadow-lg p-4 w-full sm:w-80">
+      {/* Floating pill search bar */}
+      <div className="absolute top-3 left-3 right-3 z-20 sm:left-4 sm:top-4 sm:w-96 sm:right-auto">
+        <div className="bg-white rounded-full shadow-lg flex items-center px-4 py-2.5">
+          <svg className="w-5 h-5 text-gray-400 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <circle cx="11" cy="11" r="7" />
+            <path d="m20 20-3.5-3.5" strokeLinecap="round" />
+          </svg>
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-            placeholder="Search for a place..."
-            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-black"
+            placeholder="Search here"
+            className="flex-1 min-w-0 px-3 py-1 bg-transparent focus:outline-none text-black placeholder-gray-500"
           />
+          {searchQuery && (
+            <button
+              onClick={() => { setSearchQuery(''); setSearchResults([]) }}
+              className="text-gray-400 hover:text-gray-600 shrink-0 px-1"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path d="M6 6l12 12M18 6L6 18" strokeLinecap="round" />
+              </svg>
+            </button>
+          )}
           <button
             onClick={handleSearch}
-            className="mt-2 w-full bg-blue-500 text-white py-2 rounded-md hover:bg-blue-600 transition-colors"
+            className="ml-1 text-blue-600 font-medium shrink-0"
           >
             Search
           </button>
-
-          {/* Search Results */}
-          {searchResults.length > 0 && (
-            <div className="mt-2 max-h-60 overflow-y-auto">
-              {searchResults.map((result) => (
-                <button
-                  key={result.id}
-                  onClick={() => selectResult(result)}
-                  className="w-full text-left px-3 py-2 hover:bg-gray-100 rounded-md transition-colors text-black"
-                >
-                  {result.place_name}
-                </button>
-              ))}
-            </div>
-          )}
         </div>
+
+        {/* Search Results dropdown */}
+        {searchResults.length > 0 && (
+          <div className="mt-2 bg-white rounded-2xl shadow-lg max-h-72 overflow-y-auto">
+            {searchResults.map((result, i) => (
+              <button
+                key={result.id}
+                onClick={() => selectResult(result)}
+                className={`w-full text-left px-4 py-3 hover:bg-gray-100 flex items-start gap-3 ${i > 0 ? 'border-t border-gray-100' : ''} first:rounded-t-2xl last:rounded-b-2xl`}
+              >
+                <svg className="w-5 h-5 text-gray-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <path d="M12 21s-7-5.1-7-11a7 7 0 1 1 14 0c0 5.9-7 11-7 11z" />
+                  <circle cx="12" cy="10" r="2.5" />
+                </svg>
+                <span className="text-sm text-black leading-snug">{result.place_name}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
-      {/* Turn-by-turn Directions */}
+      {/* Compact directions card (bottom sheet style) */}
       {directions.length > 0 && (
-        <div className="absolute bottom-4 left-4 right-4 z-20">
-          <div className="bg-white rounded-lg shadow-lg p-4 max-w-md mx-auto max-h-[50vh] overflow-y-auto">
-            <h3 className="font-semibold text-lg mb-2 text-black">Directions</h3>
-            <div className="space-y-2">
-              {directions.map((step, index) => (
-                <div
-                  key={index}
-                  className={`p-2 rounded-md ${index === currentStep ? 'bg-blue-100 border-2 border-blue-500' : 'bg-gray-50'}`}
-                >
-                  <p className="font-medium text-black">{step.maneuver?.instruction || 'Continue'}</p>
-                  <p className="text-sm text-gray-600">{step.distance ? `${(step.distance / 1000).toFixed(1)} km` : ''}</p>
-                </div>
-              ))}
+        <div className="absolute bottom-0 left-0 right-0 z-20">
+          <div className="bg-white rounded-t-2xl shadow-2xl">
+            {/* Drag handle */}
+            <div className="flex justify-center pt-2">
+              <div className="w-10 h-1 bg-gray-300 rounded-full" />
             </div>
-            <button
-              onClick={clearRoute}
-              className="mt-4 w-full bg-red-500 text-white py-2 rounded-md hover:bg-red-600 transition-colors"
-            >
-              Clear Route
-            </button>
+
+            <div className="px-4 py-3">
+              {/* ETA row */}
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <span className="text-green-700 font-bold text-lg">{etaMin} min</span>
+                  <span className="text-gray-500 text-sm">{distKm} km</span>
+                </div>
+                <button
+                  onClick={clearRoute}
+                  className="text-gray-500 hover:text-gray-700 p-1"
+                >
+                  <svg className="w-6 h-6" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                    <path d="M6 6l12 12M18 6L6 18" strokeLinecap="round" />
+                  </svg>
+                </button>
+              </div>
+
+              {/* Next instruction */}
+              {nextStep && (
+                <button
+                  onClick={() => setShowSteps(!showSteps)}
+                  className="w-full mt-2 flex items-center gap-3 text-left"
+                >
+                  <svg className="w-6 h-6 text-blue-600 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                    <path d="M9 18l6-6-6-6" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium text-black truncate">{nextStep.maneuver?.instruction || 'Continue'}</p>
+                    <p className="text-xs text-gray-500">{nextStep.distance ? `${(nextStep.distance / 1000).toFixed(1)} km` : ''}</p>
+                  </div>
+                  <span className="text-xs text-blue-600 font-medium shrink-0">
+                    {showSteps ? 'Hide' : 'Steps'}
+                  </span>
+                </button>
+              )}
+
+              {/* Expandable all steps */}
+              {showSteps && (
+                <div className="mt-3 border-t border-gray-100 pt-2 max-h-48 overflow-y-auto space-y-1">
+                  {directions.map((step, index) => (
+                    <div key={index} className="py-1.5 flex items-start gap-2">
+                      <span className="text-xs text-gray-400 w-5 shrink-0 mt-0.5">{index + 1}</span>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm text-black">{step.maneuver?.instruction || 'Continue'}</p>
+                        <p className="text-xs text-gray-500">{step.distance ? `${(step.distance / 1000).toFixed(1)} km` : ''}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
