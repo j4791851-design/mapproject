@@ -1,5 +1,10 @@
 import GPSMap from './components/GPSMap'
+import AuthGate from './components/AuthGate'
 
 export default function Home() {
-  return <GPSMap />
+  return (
+    <AuthGate>
+      <GPSMap />
+    </AuthGate>
+  )
 }
