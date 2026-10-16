@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react'
 import Map, { Marker, Popup } from 'react-map-gl/mapbox'
+import mapboxgl from 'mapbox-gl'
 import 'mapbox-gl/dist/mapbox-gl.css'
 import { CAMERAS } from './cameras'
 import { POLICE } from './police'
@@ -85,8 +86,7 @@ export default function GPSMap() {
   const mapRef = useRef<any>(null)
   const followRef = useRef(false)
   const voiceRef = useRef(true)
-  const stepIdxRef = useRef(0)
-  const announcedRef = useRef(-1)
+  const announcedRef = useRef<any>(null)
   const stepsRef = useRef<any[]>([])
   const justSelectedRef = useRef(false)
   const [showHeliList, setShowHeliList] = useState(false)
@@ -94,12 +94,54 @@ export default function GPSMap() {
   const [selHeli, setSelHeli] = useState<any>(null)
   const [selPolice, setSelPolice] = useState<{ name: string; lng: number; lat: number } | null>(null)
   const locRef = useRef(userLocation)
+  const userMarkerRef = useRef<any>(null)
+  const targetLocRef = useRef<[number, number] | null>(null)
+  const markerInitRef = useRef(false)
 
   // Keep refs in sync so geolocation callback can read latest values
   followRef.current = follow
   voiceRef.current = voiceOn
   stepsRef.current = directions
   locRef.current = userLocation
+
+  // User dot marker: imperative mapboxgl marker so it can glide frame-by-frame
+  // without React re-renders. Blue dot + pulsing ring + heading cone, Google-style.
+  const ensureUserMarker = (map: any) => {
+    if (userMarkerRef.current) return userMarkerRef.current
+    const el = document.createElement('div')
+    el.style.cssText = 'position:relative;width:0;height:0'
+    el.innerHTML = `
+      <div class="gps-cone" style="display:none;position:absolute;left:-11px;top:-34px;width:0;height:0;border-left:11px solid transparent;border-right:11px solid transparent;border-top:32px solid rgba(66,133,244,0.35);transform-origin:11px 34px"></div>
+      <div style="position:absolute;left:-14px;top:-14px;width:28px;height:28px;border-radius:50%;background:rgba(66,133,244,0.25);animation:gpsPulse 2s ease-out infinite"></div>
+      <div style="position:absolute;left:-8px;top:-8px;width:16px;height:16px;border-radius:50%;background:#4285f4;border:2.5px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.4)"></div>`
+    const mk = new mapboxgl.Marker({ element: el, anchor: 'center' })
+    userMarkerRef.current = mk
+    return mk
+  }
+
+  // Glide the user dot toward each new GPS fix instead of teleporting
+  useEffect(() => {
+    let raf = 0
+    const tick = () => {
+      const mk = userMarkerRef.current
+      const t = targetLocRef.current
+      if (mk && t) {
+        const cur = mk.getLngLat()
+        if (!cur.lng && !cur.lat) {
+          mk.setLngLat(t)
+        } else {
+          const f = 0.14 // ~7 frames to converge at 60fps
+          const dlng = t[0] - cur.lng
+          const dlat = t[1] - cur.lat
+          if (Math.abs(dlng) + Math.abs(dlat) < 1e-7) mk.setLngLat(t)
+          else mk.setLngLat([cur.lng + dlng * f, cur.lat + dlat * f])
+        }
+      }
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [])
 
   // Speak a navigation instruction
   const speak = (text: string) => {
@@ -111,8 +153,9 @@ export default function GPSMap() {
     synth.speak(utterance)
   }
 
-  // Get user's current location
+  // Get user's current location - high accuracy so fixes are fast and precise
   useEffect(() => {
+    const geoOpts = { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (position) => {
@@ -123,46 +166,77 @@ export default function GPSMap() {
         },
         (error) => {
           console.error('Error getting location:', error)
-        }
+        },
+        geoOpts
       )
 
       // Watch for location changes
       const watchId = navigator.geolocation.watchPosition(
         (position) => {
           const { longitude, latitude } = position.coords
+          targetLocRef.current = [longitude, latitude]
+
+          const map = mapRef.current?.getMap()
+          if (map) {
+            // Create/update the gliding marker imperatively (no React re-render per frame)
+            const mk = ensureUserMarker(map)
+            if (!markerInitRef.current) {
+              mk.setLngLat([longitude, latitude])
+              markerInitRef.current = true
+            }
+            // Heading cone (when device reports a bearing)
+            const hdg = position.coords.heading
+            const cone = mk.getElement().querySelector('.gps-cone') as HTMLElement | null
+            if (cone) {
+              if (hdg != null && !isNaN(hdg)) {
+                cone.style.display = 'block'
+                cone.style.transform = `rotate(${hdg}deg)`
+              } else {
+                cone.style.display = 'none'
+              }
+            }
+          }
+
           setUserLocation({ longitude, latitude })
 
           // Follow mode: keep camera centered on user (like Google Maps navigation)
           if (followRef.current) {
-            const map = mapRef.current?.getMap()
             if (map) {
-              map.easeTo({ center: [longitude, latitude], duration: 500 })
+              // linear easing = constant glide, no rubber-band stall between fixes
+              map.easeTo({ center: [longitude, latitude], duration: 900, easing: (t: number) => t })
             } else {
               setViewState((vs) => ({ ...vs, longitude, latitude }))
             }
           }
 
-          // Voice guidance: announce instruction when approaching its maneuver point
+          // Voice guidance: announce instruction when approaching its maneuver point.
+          // directions[] holds only REMAINING steps - passed turns get removed below.
           const steps = stepsRef.current
-          const idx = stepIdxRef.current
-          const next = steps[idx]
+          const next = steps[0]
           if (next?.maneuver?.location) {
             const [mLng, mLat] = next.maneuver.location
             const d = distMeters(longitude, latitude, mLng, mLat)
-            if (d < 50 && announcedRef.current !== idx) {
-              announcedRef.current = idx
+            if (d < 50 && announcedRef.current !== next) {
+              announcedRef.current = next
               const text = next.maneuver?.instruction || 'Continue'
               speak(`In ${Math.round(d)} meters, ${text}`)
             }
-            if (d < 12 && steps[idx + 1]) {
-              // Passed the maneuver - advance to next step
-              stepIdxRef.current = idx + 1
+            if (d < 12 && steps.length > 1) {
+              // Passed the maneuver - drop it so only upcoming turns remain,
+              // and read out the new next step right away
+              setDirections((prev) => prev.slice(1))
+              const upcoming = steps[1]
+              if (upcoming?.maneuver?.instruction) {
+                speak(`Then, ${upcoming.maneuver.instruction}`)
+                announcedRef.current = upcoming
+              }
             }
           }
         },
         (error) => {
           console.error('Error watching location:', error)
-        }
+        },
+        geoOpts
       )
 
       return () => navigator.geolocation.clearWatch(watchId)
@@ -480,8 +554,7 @@ export default function GPSMap() {
       const steps = route.legs.flatMap((leg: any) => leg.steps || [])
       setDirections(steps)
       setShowSteps(false)
-      stepIdxRef.current = 0
-      announcedRef.current = -1
+      announcedRef.current = null
       // Lock camera onto user once navigation starts, like Google Maps
       // (skip while custom-planning so waypoint taps don't yank the camera)
       if (!customMode) {
@@ -491,7 +564,7 @@ export default function GPSMap() {
       // Announce first instruction (also unlocks speech on iOS, since this runs after a tap)
       if (steps[0]?.maneuver?.instruction) {
         speak(steps[0].maneuver.instruction)
-        announcedRef.current = 0
+        announcedRef.current = steps[0]
       }
     } catch (error) {
       console.error('Error getting directions:', error)
@@ -538,8 +611,7 @@ export default function GPSMap() {
     setShowSteps(false)
     setSaving(false)
     setCamsOnRoute(null)
-    stepIdxRef.current = 0
-    announcedRef.current = -1
+    announcedRef.current = null
     if ('speechSynthesis' in window) window.speechSynthesis.cancel()
   }
 
@@ -622,6 +694,7 @@ export default function GPSMap() {
 
   return (
     <div className="relative w-full h-dvh">
+      <style>{`@keyframes gpsPulse{0%{transform:scale(0.6);opacity:0.8}70%{transform:scale(2.6);opacity:0}100%{transform:scale(2.6);opacity:0}}`}</style>
       <Map
         ref={mapRef}
         {...viewState}
@@ -753,16 +826,7 @@ export default function GPSMap() {
         mapStyle="mapbox://styles/mapbox/streets-v12"
         mapboxAccessToken={MAPBOX_TOKEN}
       >
-        {/* User location marker */}
-        {userLocation && (
-          <Marker
-            longitude={userLocation.longitude}
-            latitude={userLocation.latitude}
-            anchor="center"
-          >
-            <div className="w-4 h-4 bg-blue-500 rounded-full border-2 border-white shadow-md" />
-          </Marker>
-        )}
+        {/* User location marker is rendered imperatively (see ensureUserMarker) so it glides smoothly */}
 
         {/* Destination pin marker */}
         {destination && (
