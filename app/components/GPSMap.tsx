@@ -179,52 +179,67 @@ export default function GPSMap() {
     try {
       let route = await fetchBest(buildExclude([]))
       if (!route) return
-      const saneDuration = route.duration * 1.6 // cap detours at ~60% longer than the base route
 
       if (camsStrict) {
         const excludedKeys = new Set<string>()
         const excludedPts: [number, number][] = []
         let motorwayAdded = classes.includes('motorway')
+        let radius = 200
 
-        for (let attempt = 0; attempt < 6; attempt++) {
-          const cams = camsNearRoute(route, 200)
+        // Strict cam mode: no duration limit - try everything to hit 0 cameras
+        for (let attempt = 0; attempt < 10; attempt++) {
+          const cams = camsNearRoute(route, radius)
           const fresh = cams.filter(([lng, lat]) => !excludedKeys.has(`${lng},${lat}`))
-          if (fresh.length === 0) break
 
-          if (excludedPts.length >= 50) {
-            // Exclusion point cap reached - drop motorways (where most cams live) as last resort
+          if (fresh.length === 0) {
+            if (camsNearRoute(route).length === 0) break // verified clean
+            // Nothing new to exclude but cams remain - escalate
+            if (!motorwayAdded) {
+              classes.push('motorway')
+              motorwayAdded = true
+              try {
+                const better = await fetchBest(buildExclude(excludedPts))
+                if (better) route = better
+              } catch {}
+              continue
+            }
+            if (radius < 500) {
+              radius += 100 // widen the net around the route
+              continue
+            }
+            break // exhausted all options
+          }
+
+          if (excludedPts.length + fresh.length > 50) {
+            // Over the 50-point cap - try motorway exclusion first, then
+            // reprioritize the list to only the cams currently on the route
             if (!motorwayAdded) {
               classes.push('motorway')
               motorwayAdded = true
               continue
             }
-            break
-          }
-
-          for (const [lng, lat] of fresh.slice(0, 50 - excludedPts.length)) {
-            excludedKeys.add(`${lng},${lat}`)
-            excludedPts.push([lng, lat])
+            excludedPts.length = 0
+            excludedKeys.clear()
+            for (const [lng, lat] of cams.slice(0, 50)) {
+              excludedKeys.add(`${lng},${lat}`)
+              excludedPts.push([lng, lat])
+            }
+          } else {
+            for (const [lng, lat] of fresh) {
+              excludedKeys.add(`${lng},${lat}`)
+              excludedPts.push([lng, lat])
+            }
           }
 
           try {
-            const better = await fetchBest(buildExclude(excludedPts), saneDuration)
-            // only accept if it doesn't add cameras and isn't an absurd detour
+            const better = await fetchBest(buildExclude(excludedPts))
+            // accept any route that doesn't make things worse - it may shift cams for the next pass
             if (better && camsNearRoute(better).length <= camsNearRoute(route).length) {
               route = better
             }
           } catch {
             break
           }
-        }
-
-        // Still cameras on the route? Force motorway exclusion even if under the point cap
-        if (camsNearRoute(route).length > 0 && !motorwayAdded) {
-          classes.push('motorway')
-          motorwayAdded = true
-          try {
-            const better = await fetchBest(buildExclude(excludedPts), saneDuration)
-            if (better && camsNearRoute(better).length < camsNearRoute(route).length) route = better
-          } catch {}
         }
 
         const remaining = camsNearRoute(route)
