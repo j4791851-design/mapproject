@@ -99,6 +99,7 @@ export default function GPSMap() {
   const [speedKmh, setSpeedKmh] = useState<number>(0)
   const locRef = useRef(userLocation)
   const lastFixRef = useRef<{ lng: number; lat: number; t: number } | null>(null)
+  const lastFixTsRef = useRef(0)
   const userMarkerRef = useRef<any>(null)
   const targetLocRef = useRef<[number, number] | null>(null)
   const markerInitRef = useRef(false)
@@ -125,29 +126,37 @@ export default function GPSMap() {
     return mk
   }
 
-  // Glide the user dot toward each new GPS fix instead of teleporting
-  useEffect(() => {
-    let raf = 0
+  // Glide the user dot toward each new GPS fix instead of teleporting.
+  // Battery: the frame loop only runs while converging, then sleeps.
+  const glideRunningRef = useRef(false)
+  const kickGlide = () => {
+    if (glideRunningRef.current) return
+    glideRunningRef.current = true
     const tick = () => {
       const mk = userMarkerRef.current
       const t = targetLocRef.current
-      if (mk && t) {
-        const cur = mk.getLngLat()
-        if (!cur.lng && !cur.lat) {
-          mk.setLngLat(t)
-        } else {
-          const f = 0.14 // ~7 frames to converge at 60fps
-          const dlng = t[0] - cur.lng
-          const dlat = t[1] - cur.lat
-          if (Math.abs(dlng) + Math.abs(dlat) < 1e-7) mk.setLngLat(t)
-          else mk.setLngLat([cur.lng + dlng * f, cur.lat + dlat * f])
-        }
+      if (!mk || !t) {
+        glideRunningRef.current = false
+        return
       }
-      raf = requestAnimationFrame(tick)
+      const cur = mk.getLngLat()
+      if (!cur.lng && !cur.lat) {
+        mk.setLngLat(t)
+        glideRunningRef.current = false
+        return
+      }
+      const dlng = t[0] - cur.lng
+      const dlat = t[1] - cur.lat
+      if (Math.abs(dlng) + Math.abs(dlat) < 1e-7) {
+        mk.setLngLat(t)
+        glideRunningRef.current = false
+        return
+      }
+      mk.setLngLat([cur.lng + dlng * 0.14, cur.lat + dlat * 0.14])
+      requestAnimationFrame(tick)
     }
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
-  }, [])
+    requestAnimationFrame(tick)
+  }
 
   // Speak a navigation instruction
   const speak = (text: string) => {
@@ -159,28 +168,36 @@ export default function GPSMap() {
     synth.speak(utterance)
   }
 
-  // Get user's current location - high accuracy so fixes are fast and precise
+  // Initial position fix (one shot)
   useEffect(() => {
-    const geoOpts = { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }
-    if (navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        (position) => {
-          const { longitude, latitude } = position.coords
-          setUserLocation({ longitude, latitude })
-          setViewState({ longitude, latitude, zoom: 15 })
-          setFollow(true)
-        },
-        (error) => {
-          console.error('Error getting location:', error)
-        },
-        geoOpts
-      )
+    if (!navigator.geolocation) return
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const { longitude, latitude } = position.coords
+        setUserLocation({ longitude, latitude })
+        setViewState({ longitude, latitude, zoom: 15 })
+        setFollow(true)
+      },
+      (error) => {
+        console.error('Error getting location:', error)
+      },
+      { enableHighAccuracy: true, maximumAge: 30000, timeout: 15000 }
+    )
+  }, [])
 
-      // Watch for location changes
-      const watchId = navigator.geolocation.watchPosition(
-        (position) => {
-          const { longitude, latitude } = position.coords
-          targetLocRef.current = [longitude, latitude]
+  // Battery: the GPS radio only runs in high-accuracy mode while a route is
+  // active; plain map browsing uses coarse positioning, which is far cheaper.
+  const navOn = Boolean(route)
+  useEffect(() => {
+    if (!navigator.geolocation) return
+    const geoOpts = navOn
+      ? { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }
+      : { enableHighAccuracy: false, maximumAge: 10000, timeout: 20000 }
+    const watchId = navigator.geolocation.watchPosition(
+      (position) => {
+        const { longitude, latitude } = position.coords
+        targetLocRef.current = [longitude, latitude]
+        kickGlide()
 
           const map = mapRef.current?.getMap()
           if (map) {
@@ -203,7 +220,14 @@ export default function GPSMap() {
             }
           }
 
-          setUserLocation({ longitude, latitude })
+          // Battery: React state only needs frequent updates while navigating;
+          // in browse mode throttle re-renders to every 2s
+          const now = Date.now()
+          if (navOn || now - lastFixTsRef.current > 2000) {
+            setUserLocation({ longitude, latitude })
+            lastFixTsRef.current = now
+          }
+          locRef.current = { longitude, latitude }
 
           // Speed display: prefer the device's own speed reading, fall back
           // to distance/time between fixes. Deadband below ~4 km/h kills jitter.
@@ -258,9 +282,8 @@ export default function GPSMap() {
         geoOpts
       )
 
-      return () => navigator.geolocation.clearWatch(watchId)
-    }
-  }, [])
+    return () => navigator.geolocation.clearWatch(watchId)
+  }, [navOn])
 
   // Keep the screen awake the whole time the site is open. On iOS the Wake
   // Lock API is unreliable (all iOS browsers are WebKit), so NoSleep also
@@ -297,6 +320,7 @@ export default function GPSMap() {
   useEffect(() => {
     let alive = true
     const load = async () => {
+      if (document.hidden) return // battery: don't wake the radio while tab is backgrounded
       const loc = locRef.current ?? (() => {
         const c = mapRef.current?.getMap()?.getCenter()
         return c ? { longitude: c.lng, latitude: c.lat } : null
@@ -341,7 +365,7 @@ export default function GPSMap() {
       setSelHeli((s: any) => (s ? out.find((h) => h.hex === s.hex) ?? s : s))
     }
     load()
-    const iv = setInterval(load, 20000)
+    const iv = setInterval(load, 35000)
     return () => {
       alive = false
       clearInterval(iv)
@@ -354,6 +378,7 @@ export default function GPSMap() {
   useEffect(() => {
     let alive = true
     const load = async () => {
+      if (document.hidden) return
       const loc = locRef.current
       if (!loc) return
       try {
@@ -366,7 +391,7 @@ export default function GPSMap() {
       }
     }
     load()
-    const iv = setInterval(load, 90000)
+    const iv = setInterval(load, 120000)
     return () => {
       alive = false
       clearInterval(iv)
