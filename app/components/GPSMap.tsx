@@ -108,7 +108,7 @@ export default function GPSMap() {
   const [showHeliList, setShowHeliList] = useState(false)
   const [helis, setHelis] = useState<any[]>([])
   const [selHeli, setSelHeli] = useState<any>(null)
-  const [selPolice, setSelPolice] = useState<{ name: string; lng: number; lat: number } | null>(null)
+  const [selPolice, setSelPolice] = useState<{ name: string; sub?: string; lng: number; lat: number } | null>(null)
   const [batterySaver, setBatterySaver] = useState(false)
   const [speedKmh, setSpeedKmh] = useState<number>(0)
   const locRef = useRef(userLocation)
@@ -959,13 +959,26 @@ export default function GPSMap() {
         onClick={(evt) => {
           const f = (evt as any).features?.[0]
           if (f?.layer?.id === 'police-stations') {
-            setSelPolice({ name: f.properties?.name || 'Police station', lng: evt.lngLat.lng, lat: evt.lngLat.lat })
+            setSelPolice({ name: f.properties?.name || 'Police station', sub: 'Police station', lng: evt.lngLat.lng, lat: evt.lngLat.lat })
+            return
+          }
+          if (f?.layer?.id === 'traffic-cams') {
+            const nm: string = f.properties?.name || 'Traffic camera'
+            const sub = nm.includes('(Hwy CCTV)')
+              ? 'Highway traffic camera'
+              : nm.includes('(Mississauga)')
+                ? 'Mississauga traffic CCTV'
+                : nm.includes('(Brampton)')
+                  ? 'Brampton intersection CCTV'
+                  : 'Toronto traffic CCTV'
+            const [cl, ct] = f.geometry?.coordinates ?? [evt.lngLat.lng, evt.lngLat.lat]
+            setSelPolice({ name: nm, sub, lng: cl, lat: ct })
             return
           }
           // Custom route mode: tap the map to steer the route around cameras
           if (customMode && route) addWaypoint(evt.lngLat.lng, evt.lngLat.lat)
         }}
-        interactiveLayerIds={['police-stations']}
+        interactiveLayerIds={['police-stations', 'traffic-cams']}
         style={{ width: '100%', height: '100%' }}
         cursor={customMode && route ? 'crosshair' : 'grab'}
         mapStyle={batterySaver ? 'mapbox://styles/mapbox/navigation-night-v1' : 'mapbox://styles/mapbox/streets-v12'}
@@ -1034,7 +1047,10 @@ export default function GPSMap() {
             onClose={() => setSelPolice(null)}
             className="text-black"
           >
-            <div className="text-sm font-medium px-1 py-0.5">{selPolice.name}</div>
+            <div className="px-1 py-0.5">
+              <div className="text-sm font-medium">{selPolice.name}</div>
+              {selPolice.sub && <div className="text-xs text-gray-500">{selPolice.sub}</div>}
+            </div>
           </Popup>
         )}
       </Map>
@@ -1176,6 +1192,18 @@ export default function GPSMap() {
         {/* Active helicopters list */}
         {showHeliList && (
           <div className="mt-2 bg-white rounded-2xl shadow-lg max-h-56 overflow-y-auto">
+            <div className="flex items-center justify-between px-4 py-2 sticky top-0 bg-white z-10">
+              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Active helicopters</span>
+              <button
+                onClick={() => setShowHeliList(false)}
+                className="text-gray-400 hover:text-gray-600 p-1 -mr-1"
+                aria-label="Close helicopter list"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <path d="M6 6l12 12M18 6L6 18" strokeLinecap="round" />
+                </svg>
+              </button>
+            </div>
             {helis.length === 0 ? (
               <div className="px-4 py-4 text-sm text-gray-500">No helicopters broadcasting nearby right now.</div>
             ) : (
