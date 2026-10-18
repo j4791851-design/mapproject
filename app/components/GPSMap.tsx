@@ -103,12 +103,24 @@ export default function GPSMap() {
   const userMarkerRef = useRef<any>(null)
   const targetLocRef = useRef<[number, number] | null>(null)
   const markerInitRef = useRef(false)
+  const routeRef = useRef<any>(null)
+  const destRef = useRef<{ longitude: number; latitude: number } | null>(null)
+  const wpsRef = useRef<{ longitude: number; latitude: number }[]>([])
+  const prefsRef = useRef({ tolls: false, highways: false, cams: false })
+  const routeSetAtRef = useRef(0)
+  const offRouteSinceRef = useRef<number | null>(null)
+  const lastRerouteRef = useRef(0)
+  const reroutingRef = useRef(false)
 
   // Keep refs in sync so geolocation callback can read latest values
   followRef.current = follow
   voiceRef.current = voiceOn
   stepsRef.current = directions
   locRef.current = userLocation
+  routeRef.current = route
+  destRef.current = destination
+  wpsRef.current = waypoints
+  prefsRef.current = { tolls: avoidTolls, highways: avoidHighways, cams: avoidCams }
 
   // User dot marker: imperative mapboxgl marker so it can glide frame-by-frame
   // without React re-renders. Blue dot + pulsing ring + heading cone, Google-style.
@@ -273,6 +285,55 @@ export default function GPSMap() {
                 speak(`Then, ${upcoming.maneuver.instruction}`)
                 announcedRef.current = upcoming
               }
+            }
+          }
+
+          // Off-route detection: if we stray >30m from the route polyline for
+          // 2s straight, recalculate from the current position. Mapbox picks the
+          // smartest rejoin (almost never demands a U-turn), remaining waypoints
+          // carry over, and the camera-avoid iteration still runs when '0 cams'
+          // is on. Guarded by an accuracy check, a grace period after each route
+          // set, and a 15s cooldown so it can't flail.
+          const curRoute = routeRef.current
+          const curDest = destRef.current
+          if (
+            curRoute?.geometry?.coordinates && curDest &&
+            now - routeSetAtRef.current > 8000 &&
+            (position.coords.accuracy == null || position.coords.accuracy < 45)
+          ) {
+            const coords: number[][] = curRoute.geometry.coordinates
+            let minD = Infinity
+            for (const [cl, ct] of coords) {
+              const dd = distMeters(longitude, latitude, cl, ct)
+              if (dd < minD) minD = dd
+              if (minD < 30) break
+            }
+            if (minD > 30) {
+              if (offRouteSinceRef.current == null) offRouteSinceRef.current = now
+              if (
+                now - offRouteSinceRef.current > 2000 &&
+                now - lastRerouteRef.current > 15000 &&
+                !reroutingRef.current
+              ) {
+                reroutingRef.current = true
+                lastRerouteRef.current = now
+                // Drop waypoints already reached so the reroute doesn't send
+                // the driver back to a stop they already visited
+                const remaining = wpsRef.current.filter(
+                  (w) => distMeters(longitude, latitude, w.longitude, w.latitude) > 80
+                )
+                speak('Rerouting')
+                const { tolls, highways, cams } = prefsRef.current
+                getDirections(curDest, {
+                  tolls, highways, cams,
+                  wps: remaining,
+                  from: { longitude, latitude },
+                }).finally(() => {
+                  reroutingRef.current = false
+                })
+              }
+            } else {
+              offRouteSinceRef.current = null
             }
           }
         },
@@ -596,6 +657,7 @@ export default function GPSMap() {
       setCamsOnRoute(score(route))
 
       setRoute(route)
+      routeSetAtRef.current = Date.now()
       const steps = route.legs.flatMap((leg: any) => leg.steps || [])
       setDirections(steps)
       setShowSteps(false)
