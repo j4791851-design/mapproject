@@ -1068,7 +1068,7 @@ export default function GPSMap() {
             latitude={selPolice.lat}
             anchor="bottom"
             offset={18}
-            closeOnClick={false}
+            closeOnClick={true}
             onClose={() => setSelPolice(null)}
             className="text-black"
           >
