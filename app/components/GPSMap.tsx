@@ -241,18 +241,24 @@ export default function GPSMap() {
           }
           locRef.current = { longitude, latitude }
 
-          // Speed display: prefer the device's own speed reading, fall back
-          // to distance/time between fixes. Deadband below ~4 km/h kills jitter.
-          let kmh = position.coords.speed != null ? position.coords.speed * 3.6 : NaN
-          if (isNaN(kmh)) {
-            const last = lastFixRef.current
-            if (last) {
-              const dt = (position.timestamp - last.t) / 1000
-              if (dt > 0) kmh = (distMeters(last.lng, last.lat, longitude, latitude) / dt) * 3.6
-            }
-          }
+          // Speed display: cross-check the device's own speed reading against
+          // actual displacement between fixes. Sitting still, GPS jitter makes
+          // fixes bounce around inside the accuracy circle - if the estimated
+          // speed from displacement is near zero, any claimed speed is bogus.
+          const acc = position.coords.accuracy ?? 30
+          const last = lastFixRef.current
+          const dt = last ? (position.timestamp - last.t) / 1000 : 0
+          const moved = last ? distMeters(last.lng, last.lat, longitude, latitude) : 0
+          const estKmh = last && dt > 0 ? (moved / dt) * 3.6 : null
+          const deviceKmh =
+            position.coords.speed != null && !isNaN(position.coords.speed)
+              ? position.coords.speed * 3.6
+              : null
+          let kmh = deviceKmh ?? 0
+          if (estKmh != null && estKmh < 3) kmh = 0
+          if (deviceKmh == null && estKmh != null && moved > Math.max(acc * 0.5, 2)) kmh = estKmh
           lastFixRef.current = { lng: longitude, lat: latitude, t: position.timestamp }
-          if (!isNaN(kmh)) setSpeedKmh(kmh < 4 ? 0 : Math.round(kmh))
+          setSpeedKmh(kmh < 7 ? 0 : Math.round(kmh))
 
           // Follow mode: keep camera centered on user (like Google Maps navigation)
           if (followRef.current) {
