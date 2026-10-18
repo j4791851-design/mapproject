@@ -465,13 +465,24 @@ export default function GPSMap() {
       return
     }
     let alive = true
+    let timer: ReturnType<typeof setTimeout>
     const load = async () => {
-      if (document.hidden) return // battery: don't wake the radio while tab is backgrounded
+      if (!alive) return
+      // Adaptive poll: 35s while helis are on screen, 90s when the sky's empty,
+      // 90s while the tab is hidden (don't wake the radio in the background)
+      let next = 90000
+      if (document.hidden) {
+        timer = setTimeout(load, next)
+        return
+      }
       const loc = locRef.current ?? (() => {
         const c = mapRef.current?.getMap()?.getCenter()
         return c ? { longitude: c.lng, latitude: c.lat } : null
       })()
-      if (!loc) return
+      if (!loc) {
+        timer = setTimeout(load, next)
+        return
+      }
       const d = await fetch(`/api/helis?lat=${loc.latitude.toFixed(4)}&lng=${loc.longitude.toFixed(4)}`)
         .then((r) => (r.ok ? r.json() : null))
         .catch(() => null)
@@ -510,12 +521,13 @@ export default function GPSMap() {
       out.sort((a, b) => a.distKm - b.distKm)
       setHelis(out)
       setSelHeli((s: any) => (s ? out.find((h) => h.hex === s.hex) ?? s : s))
+      next = out.length > 0 ? 35000 : 90000
+      timer = setTimeout(load, next)
     }
     load()
-    const iv = setInterval(load, 35000)
     return () => {
       alive = false
-      clearInterval(iv)
+      clearTimeout(timer)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- location read via ref so GPS ticks don't retrigger fetches
   }, [batterySaver])
