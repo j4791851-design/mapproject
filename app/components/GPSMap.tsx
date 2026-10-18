@@ -8,6 +8,7 @@ import NoSleep from 'nosleep.js'
 import 'mapbox-gl/dist/mapbox-gl.css'
 import { CAMERAS } from './cameras'
 import { POLICE } from './police'
+import { GAS_STATIONS } from './gas'
 
 const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || ''
 
@@ -82,6 +83,27 @@ const isCanada = (lng: number, lat: number) => {
   return inside
 }
 
+// Known chains default to prepay (pay inside/card before fuel). No-name
+// independents are "potentially pump first". Community votes override both.
+const KNOWN_BRANDS = ['esso', 'petro-canada', 'petro canada', 'shell', 'canadian tire', 'costco', 'chevron', 'ultramar', 'husky', 'mobil', 'sunoco', 'irving', 'circle k', 'couche-tard', 'mac\'s', '7-eleven', 'pioneer', 'fas gas', 'goco', 'olco', 'canadian tire gas']
+
+const gasKey = (lng: number, lat: number) => `${lng.toFixed(4)},${lat.toFixed(4)}`
+
+// 'pump'/'prepay' = community-verified; 'prepay-inferred' = known brand;
+// 'pump-inferred' = unnamed independent
+const classifyGas = (name: string, lng: number, lat: number, votes: Record<string, string>) => {
+  const v = votes[gasKey(lng, lat)]
+  if (v === 'pump' || v === 'prepay') return v
+  const n = name.toLowerCase()
+  return KNOWN_BRANDS.some((b) => n.includes(b)) ? 'prepay-inferred' : 'pump-inferred'
+}
+
+const gasLabel = (c: string) =>
+  c === 'pump' ? 'Pump before pay'
+    : c === 'pump-inferred' ? 'Potentially pump first'
+      : c === 'prepay' || c === 'prepay-inferred' ? 'Prepay'
+        : 'payment unknown'
+
 const HELI_NAMES: Record<string, string> = {
   R22: 'Robinson R22', R44: 'Robinson R44', R66: 'Robinson R66',
   B06: 'Bell 206 JetRanger', B407: 'Bell 407', B412: 'Bell 412', B427: 'Bell 427', B429: 'Bell 429', B505: 'Bell 505',
@@ -134,6 +156,10 @@ export default function GPSMap() {
   const [helis, setHelis] = useState<any[]>([])
   const [selHeli, setSelHeli] = useState<any>(null)
   const [selPolice, setSelPolice] = useState<{ name: string; sub?: string; lng: number; lat: number } | null>(null)
+  const [showGas, setShowGas] = useState(false)
+  const [selGas, setSelGas] = useState<{ name: string; lng: number; lat: number } | null>(null)
+  const [gasFilter, setGasFilter] = useState<'all' | 'pump' | 'prepay'>('all')
+  const [gasVotes, setGasVotes] = useState<Record<string, 'pump' | 'prepay'>>({})
   const [batterySaver, setBatterySaver] = useState(false)
   const [speedKmh, setSpeedKmh] = useState<number>(0)
   const locRef = useRef(userLocation)
@@ -147,6 +173,9 @@ export default function GPSMap() {
   const wpsRef = useRef<{ longitude: number; latitude: number }[]>([])
   const prefsRef = useRef({ tolls: false, highways: false, cams: false })
   const routeSetAtRef = useRef(0)
+  const gasRef = useRef(false)
+  const gasVotesRef = useRef<Record<string, 'pump' | 'prepay'>>({})
+  const gasFilterRef = useRef<'all' | 'pump' | 'prepay'>('all')
   const offRouteSinceRef = useRef<number | null>(null)
   const lastRerouteRef = useRef(0)
   const reroutingRef = useRef(false)
@@ -160,6 +189,9 @@ export default function GPSMap() {
   destRef.current = destination
   wpsRef.current = waypoints
   prefsRef.current = { tolls: avoidTolls, highways: avoidHighways, cams: avoidCams }
+  gasRef.current = showGas
+  gasVotesRef.current = gasVotes
+  gasFilterRef.current = gasFilter
 
   // User dot marker: imperative mapboxgl marker so it can glide frame-by-frame
   // without React re-renders. Blue dot + pulsing ring + heading cone, Google-style.
@@ -952,7 +984,95 @@ export default function GPSMap() {
         'icon-allow-overlap': true
       }
     })
+
+    // Gas pump icon: green circle, white pump body + hose
+    const gCanvas = document.createElement('canvas')
+    gCanvas.width = size
+    gCanvas.height = size
+    const gCtx = gCanvas.getContext('2d')!
+    gCtx.beginPath()
+    gCtx.arc(32, 32, 30, 0, Math.PI * 2)
+    gCtx.fillStyle = '#16a34a'
+    gCtx.fill()
+    gCtx.strokeStyle = '#ffffff'
+    gCtx.lineWidth = 3
+    gCtx.stroke()
+    gCtx.fillStyle = '#ffffff'
+    gCtx.fillRect(20, 20, 20, 24)
+    gCtx.fillRect(23, 24, 14, 8)
+    gCtx.beginPath()
+    gCtx.moveTo(40, 22)
+    gCtx.lineTo(46, 26)
+    gCtx.lineTo(46, 38)
+    gCtx.lineWidth = 3
+    gCtx.strokeStyle = '#ffffff'
+    gCtx.stroke()
+    gCtx.fillStyle = '#16a34a'
+    gCtx.fillRect(24, 25, 12, 6)
+    map.addImage('gas-icon', gCtx.getImageData(0, 0, size, size))
+
+    map.addSource('gas-stations', {
+      type: 'geojson',
+      data: {
+        type: 'FeatureCollection',
+        features: GAS_STATIONS.map(([lng, lat, name]) => ({
+          type: 'Feature',
+          properties: { name, key: gasKey(lng, lat) },
+          geometry: { type: 'Point', coordinates: [lng, lat] }
+        }))
+      }
+    })
+
+    map.addLayer({
+      id: 'gas-stations',
+      type: 'symbol',
+      source: 'gas-stations',
+      layout: {
+        'icon-image': 'gas-icon',
+        'icon-size': 0.42,
+        'icon-allow-overlap': true,
+        visibility: gasRef.current ? 'visible' : 'none'
+      }
+    })
   }
+
+  // Show/hide the gas layer, and lazily load community votes the first time
+  // the layer is switched on. The pump/prepay filter is applied as a Mapbox
+  // layer filter over the station 'key' property.
+  useEffect(() => {
+    const map = mapRef.current?.getMap()
+    if (map?.getLayer('gas-stations')) {
+      map.setLayoutProperty('gas-stations', 'visibility', showGas ? 'visible' : 'none')
+    }
+    if (!showGas) setSelGas(null)
+    else {
+      fetch('/api/gasvote')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => { if (d?.votes) setGasVotes(d.votes) })
+        .catch(() => {})
+    }
+  }, [showGas])
+
+  const applyGasFilter = (map: any) => {
+    if (!map?.getLayer('gas-stations')) return
+    const f = gasFilterRef.current
+    if (f === 'all') {
+      map.setFilter('gas-stations', null)
+      return
+    }
+    const keys = GAS_STATIONS
+      .filter(([lng, lat, name]) => {
+        const c = classifyGas(name, lng, lat, gasVotesRef.current)
+        return f === 'pump' ? c === 'pump' || c === 'pump-inferred' : c === 'prepay' || c === 'prepay-inferred'
+      })
+      .map(([lng, lat]) => gasKey(lng, lat))
+    map.setFilter('gas-stations', ['in', ['get', 'key'], ['literal', keys]])
+  }
+
+  useEffect(() => {
+    const map = mapRef.current?.getMap()
+    applyGasFilter(map)
+  }, [gasFilter, gasVotes])
 
   const etaMin = route ? Math.round(route.duration / 60) : null
   const distKm = route ? (route.distance / 1000).toFixed(1) : null
@@ -972,6 +1092,7 @@ export default function GPSMap() {
           // and re-draw the active route so the line survives too.
           map.on('style.load', () => {
             setupMapLayers(map)
+            applyGasFilter(map)
             const r = routeRef.current
             if (r?.geometry && !map.getSource('route')) drawRoute(map, r)
           })
@@ -984,6 +1105,7 @@ export default function GPSMap() {
         onClick={(evt) => {
           const f = (evt as any).features?.[0]
           if (f?.layer?.id === 'police-stations') {
+            setSelGas(null)
             setSelPolice({ name: f.properties?.name || 'Police station', sub: 'Police station', lng: evt.lngLat.lng, lat: evt.lngLat.lat })
             return
           }
@@ -997,7 +1119,14 @@ export default function GPSMap() {
                   ? 'Brampton intersection CCTV'
                   : 'Toronto traffic CCTV'
             const [cl, ct] = f.geometry?.coordinates ?? [evt.lngLat.lng, evt.lngLat.lat]
+            setSelGas(null)
             setSelPolice({ name: nm, sub, lng: cl, lat: ct })
+            return
+          }
+          if (f?.layer?.id === 'gas-stations') {
+            const [cl, ct] = f.geometry?.coordinates ?? [evt.lngLat.lng, evt.lngLat.lat]
+            setSelPolice(null)
+            setSelGas({ name: f.properties?.name || 'Gas station', lng: cl, lat: ct })
             return
           }
           // Custom route mode: tap the map to steer the route around cameras
@@ -1007,8 +1136,9 @@ export default function GPSMap() {
           }
           // Tapped empty map (not a cam/station) - dismiss the popup
           setSelPolice(null)
+          setSelGas(null)
         }}
-        interactiveLayerIds={['police-stations', 'traffic-cams']}
+        interactiveLayerIds={['police-stations', 'traffic-cams', 'gas-stations']}
         style={{ width: '100%', height: '100%' }}
         cursor={customMode && route ? 'crosshair' : 'grab'}
         mapStyle={batterySaver ? 'mapbox://styles/mapbox/navigation-night-v1' : 'mapbox://styles/mapbox/streets-v12'}
@@ -1080,6 +1210,59 @@ export default function GPSMap() {
             <div className="px-1 py-0.5">
               <div className="text-sm font-medium">{selPolice.name}</div>
               {selPolice.sub && <div className="text-xs text-gray-500">{selPolice.sub}</div>}
+            </div>
+          </Popup>
+        )}
+
+        {/* Gas station popup - tap "Route here" to navigate to it */}
+        {selGas && (
+          <Popup
+            longitude={selGas.lng}
+            latitude={selGas.lat}
+            anchor="bottom"
+            offset={18}
+            closeOnClick={false}
+            onClose={() => setSelGas(null)}
+            className="text-black"
+          >
+            <div className="px-1 py-0.5">
+              <div className="text-sm font-medium">{selGas.name}</div>
+              <div className="text-xs text-gray-500 mb-1.5">
+                Gas station · {gasLabel(classifyGas(selGas.name, selGas.lng, selGas.lat, gasVotes))}
+              </div>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  const dest = { longitude: selGas.lng, latitude: selGas.lat }
+                  setDestination(dest)
+                  setWaypoints([])
+                  getDirections(dest, { tolls: avoidTolls, highways: avoidHighways, cams: avoidCams, wps: [] })
+                  setSelGas(null)
+                }}
+                className="w-full text-xs font-semibold bg-blue-600 text-white rounded-full px-3 py-1.5"
+              >
+                Route here
+              </button>
+              <div className="flex gap-1.5 mt-1.5">
+                {(['pump', 'prepay'] as const).map((kind) => (
+                  <button
+                    key={kind}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      const key = gasKey(selGas.lng, selGas.lat)
+                      fetch('/api/gasvote', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ key, kind }),
+                      }).catch(() => {})
+                      setGasVotes((v) => ({ ...v, [key]: kind }))
+                    }}
+                    className="flex-1 text-[10px] font-medium border border-gray-300 rounded-full px-1 py-1 text-gray-600 hover:bg-gray-100"
+                  >
+                    {kind === 'pump' ? 'Pump before pay' : 'Prepay'}
+                  </button>
+                ))}
+              </div>
             </div>
           </Popup>
         )}
@@ -1179,12 +1362,33 @@ export default function GPSMap() {
             🚁 Helis ({helis.length})
           </button>
           <button
+            onClick={() => setShowGas((g) => !g)}
+            className={`px-3 py-1.5 rounded-full text-xs font-medium shadow transition-colors ${showGas ? 'bg-green-600 text-white' : 'bg-white text-gray-700'}`}
+          >
+            ⛽ Gas
+          </button>
+          <button
             onClick={() => setBatterySaver((b) => !b)}
             className={`px-3 py-1.5 rounded-full text-xs font-medium shadow transition-colors ${batterySaver ? 'bg-green-600 text-white' : 'bg-white text-gray-700'}`}
           >
             🔋 Saver{batterySaver ? ' on' : ''}
           </button>
         </div>
+
+        {/* Gas payment filter chips */}
+        {showGas && (
+          <div className="mt-1.5 flex gap-1.5">
+            {([['all', 'All'], ['pump', 'Pump first'], ['prepay', 'Prepay only']] as const).map(([k, label]) => (
+              <button
+                key={k}
+                onClick={() => setGasFilter(k)}
+                className={`px-3 py-1 rounded-full text-xs font-medium shadow transition-colors ${gasFilter === k ? 'bg-green-600 text-white' : 'bg-white text-gray-700'}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* Saved routes dropdown */}
         {showSaved && (
