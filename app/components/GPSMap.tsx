@@ -161,7 +161,7 @@ export default function GPSMap() {
   const [selPolice, setSelPolice] = useState<{ name: string; sub?: string; lng: number; lat: number } | null>(null)
   const [showGas, setShowGas] = useState(false)
   const [selGas, setSelGas] = useState<{ name: string; lng: number; lat: number } | null>(null)
-  const [gasFilter, setGasFilter] = useState<'all' | 'pump' | 'prepay'>('all')
+  const [gasFilter, setGasFilter] = useState<'all' | 'pump' | 'potential' | 'prepay'>('all')
   const [gasVotes, setGasVotes] = useState<Record<string, { pump: number; prepay: number }>>({})
   const [batterySaver, setBatterySaver] = useState(false)
   const [speedKmh, setSpeedKmh] = useState<number>(0)
@@ -178,7 +178,7 @@ export default function GPSMap() {
   const routeSetAtRef = useRef(0)
   const gasRef = useRef(false)
   const gasVotesRef = useRef<Record<string, { pump: number; prepay: number }>>({})
-  const gasFilterRef = useRef<'all' | 'pump' | 'prepay'>('all')
+  const gasFilterRef = useRef<'all' | 'pump' | 'potential' | 'prepay'>('all')
   const offRouteSinceRef = useRef<number | null>(null)
   const lastRerouteRef = useRef(0)
   const reroutingRef = useRef(false)
@@ -1078,7 +1078,9 @@ export default function GPSMap() {
     const keys = GAS_STATIONS
       .filter(([lng, lat, name]) => {
         const c = classifyGas(name, lng, lat, gasVotesRef.current)
-        return f === 'pump' ? c === 'pump' || c === 'pump-inferred' : c === 'prepay' || c === 'prepay-inferred'
+        if (f === 'pump') return c === 'pump' // verified only: needs 2+ votes
+        if (f === 'potential') return c === 'pump-inferred'
+        return c === 'prepay' || c === 'prepay-inferred' // 'prepay'
       })
       .map(([lng, lat]) => gasKey(lng, lat))
     map.setFilter('gas-stations', ['in', ['get', 'key'], ['literal', keys]])
@@ -1399,7 +1401,7 @@ export default function GPSMap() {
         {/* Gas payment filter chips */}
         {showGas && (
           <div className="mt-1.5 flex gap-1.5">
-            {([['all', 'All'], ['pump', 'Pump first'], ['prepay', 'Prepay only']] as const).map(([k, label]) => (
+            {([['all', 'All'], ['pump', 'Pump first'], ['potential', 'Potential'], ['prepay', 'Prepay only']] as const).map(([k, label]) => (
               <button
                 key={k}
                 onClick={() => setGasFilter(k)}
