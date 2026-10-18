@@ -412,11 +412,11 @@ export default function GPSMap() {
         return c ? { longitude: c.lng, latitude: c.lat } : null
       })()
       if (!loc) return
-      const [point, mil] = await Promise.all([
-        fetch(`https://api.adsb.lol/v2/point/${loc.latitude.toFixed(4)}/${loc.longitude.toFixed(4)}/250`)
-          .then((r) => r.json()).catch(() => null),
-        fetch('https://api.adsb.lol/v2/mil').then((r) => r.json()).catch(() => null),
-      ])
+      const d = await fetch(`/api/helis?lat=${loc.latitude.toFixed(4)}&lng=${loc.longitude.toFixed(4)}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null)
+      const point = { ac: d?.point ?? [] }
+      const mil = { ac: d?.mil ?? [] }
       const seen = new Set<string>()
       const out: any[] = []
       const push = (a: any, isMil: boolean) => {
@@ -755,56 +755,58 @@ export default function GPSMap() {
     }
   }
 
+  const drawRoute = (map: any, r: any) => {
+    if (map.getSource('route')) {
+      if (map.getLayer('route')) map.removeLayer('route')
+      if (map.getLayer('route-casing')) map.removeLayer('route-casing')
+      map.removeSource('route')
+    }
+
+    map.addSource('route', {
+      type: 'geojson',
+      data: {
+        type: 'Feature',
+        properties: {},
+        geometry: r.geometry
+      }
+    })
+
+    // White casing underneath so the line pops against the map
+    map.addLayer({
+      id: 'route-casing',
+      type: 'line',
+      source: 'route',
+      layout: {
+        'line-join': 'round',
+        'line-cap': 'round'
+      },
+      paint: {
+        'line-color': '#ffffff',
+        'line-width': 10,
+        'line-opacity': 0.9
+      }
+    })
+
+    map.addLayer({
+      id: 'route',
+      type: 'line',
+      source: 'route',
+      layout: {
+        'line-join': 'round',
+        'line-cap': 'round'
+      },
+      paint: {
+        'line-color': '#1a73e8',
+        'line-width': 6,
+        'line-opacity': 0.95
+      }
+    })
+  }
+
   // Draw route on map when it changes
   useEffect(() => {
     const map = mapRef.current?.getMap()
-    if (map && route) {
-      if (map.getSource('route')) {
-        if (map.getLayer('route')) map.removeLayer('route')
-        if (map.getLayer('route-casing')) map.removeLayer('route-casing')
-        map.removeSource('route')
-      }
-
-      map.addSource('route', {
-        type: 'geojson',
-        data: {
-          type: 'Feature',
-          properties: {},
-          geometry: route.geometry
-        }
-      })
-
-      // White casing underneath so the line pops against the map
-      map.addLayer({
-        id: 'route-casing',
-        type: 'line',
-        source: 'route',
-        layout: {
-          'line-join': 'round',
-          'line-cap': 'round'
-        },
-        paint: {
-          'line-color': '#ffffff',
-          'line-width': 10,
-          'line-opacity': 0.9
-        }
-      })
-
-      map.addLayer({
-        id: 'route',
-        type: 'line',
-        source: 'route',
-        layout: {
-          'line-join': 'round',
-          'line-cap': 'round'
-        },
-        paint: {
-          'line-color': '#1a73e8',
-          'line-width': 6,
-          'line-opacity': 0.95
-        }
-      })
-    }
+    if (map && route) drawRoute(map, route)
 
     return () => {
       const m = mapRef.current?.getMap()
@@ -815,6 +817,117 @@ export default function GPSMap() {
       }
     }
   }, [route])
+
+  // Custom layers (cams, police badges). Called on initial load AND again on
+  // 'style.load' - switching mapStyle (battery saver dark mode) destroys every
+  // custom source/layer, so they must be re-added each time a style loads.
+  const setupMapLayers = (map: any) => {
+    if (map.getSource('traffic-cams')) return
+
+    const size = 64
+    const canvas = document.createElement('canvas')
+    canvas.width = size
+    canvas.height = size
+    const ctx = canvas.getContext('2d')!
+    // red warning circle
+    ctx.beginPath()
+    ctx.arc(32, 32, 30, 0, Math.PI * 2)
+    ctx.fillStyle = '#f59e0b'
+    ctx.fill()
+    ctx.strokeStyle = '#92400e'
+    ctx.lineWidth = 3
+    ctx.stroke()
+    // camera body
+    ctx.fillStyle = '#1f2937'
+    ctx.fillRect(16, 24, 24, 16)
+    ctx.beginPath()
+    ctx.moveTo(40, 28)
+    ctx.lineTo(50, 22)
+    ctx.lineTo(50, 42)
+    ctx.lineTo(40, 36)
+    ctx.closePath()
+    ctx.fill()
+    // lens
+    ctx.fillStyle = '#9ca3af'
+    ctx.fillRect(20, 29, 6, 6)
+
+    map.addImage('cam-icon', ctx.getImageData(0, 0, size, size))
+
+    const pCanvas = document.createElement('canvas')
+    pCanvas.width = size
+    pCanvas.height = size
+
+    map.addSource('traffic-cams', {
+      type: 'geojson',
+      data: {
+        type: 'FeatureCollection',
+        features: CAMERAS.map(([lng, lat, name]) => ({
+          type: 'Feature',
+          properties: { name },
+          geometry: { type: 'Point', coordinates: [lng, lat] }
+        }))
+      }
+    })
+
+    map.addLayer({
+      id: 'traffic-cams',
+      type: 'symbol',
+      source: 'traffic-cams',
+      layout: {
+        'icon-image': 'cam-icon',
+        'icon-size': 0.5,
+        'icon-allow-overlap': true
+      }
+    })
+
+    // Police badge icon: blue circle with white star
+    const pCtx = pCanvas.getContext('2d')!
+    pCtx.beginPath()
+    pCtx.arc(32, 32, 30, 0, Math.PI * 2)
+    pCtx.fillStyle = '#1d4ed8'
+    pCtx.fill()
+    pCtx.strokeStyle = '#ffffff'
+    pCtx.lineWidth = 3
+    pCtx.stroke()
+    pCtx.fillStyle = '#ffffff'
+    pCtx.beginPath()
+    const cx = 32, cy = 32, spikes = 5, outer = 16, inner = 7
+    let rot = (-Math.PI / 2)
+    const step = Math.PI / spikes
+    pCtx.moveTo(cx, cy - outer)
+    for (let i = 0; i < spikes; i++) {
+      pCtx.lineTo(cx + Math.cos(rot) * outer, cy + Math.sin(rot) * outer)
+      rot += step
+      pCtx.lineTo(cx + Math.cos(rot) * inner, cy + Math.sin(rot) * inner)
+      rot += step
+    }
+    pCtx.closePath()
+    pCtx.fill()
+    map.addImage('police-icon', pCtx.getImageData(0, 0, size, size))
+
+    map.addSource('police-stations', {
+      type: 'geojson',
+      data: {
+        type: 'FeatureCollection',
+        features: POLICE.map(([lng, lat, name]) => ({
+          type: 'Feature',
+          properties: { name },
+          geometry: { type: 'Point', coordinates: [lng, lat] }
+        }))
+      }
+    })
+
+    map.addLayer({
+      id: 'police-stations',
+      type: 'symbol',
+      source: 'police-stations',
+      layout: {
+        'icon-image': 'police-icon',
+        'icon-size': 0.42,
+        'icon-allow-overlap': true
+      }
+    })
+  }
 
   const etaMin = route ? Math.round(route.duration / 60) : null
   const distKm = route ? (route.distance / 1000).toFixed(1) : null
@@ -828,110 +941,14 @@ export default function GPSMap() {
         {...viewState}
         onLoad={(e) => {
           const map = e.target
-
-          // Draw a camera icon onto a canvas and register it
-          const size = 64
-          const canvas = document.createElement('canvas')
-          canvas.width = size
-          canvas.height = size
-          const ctx = canvas.getContext('2d')!
-          // red warning circle
-          ctx.beginPath()
-          ctx.arc(32, 32, 30, 0, Math.PI * 2)
-          ctx.fillStyle = '#f59e0b'
-          ctx.fill()
-          ctx.strokeStyle = '#92400e'
-          ctx.lineWidth = 3
-          ctx.stroke()
-          // camera body
-          ctx.fillStyle = '#1f2937'
-          ctx.fillRect(16, 24, 24, 16)
-          ctx.beginPath()
-          ctx.moveTo(40, 28)
-          ctx.lineTo(50, 22)
-          ctx.lineTo(50, 42)
-          ctx.lineTo(40, 36)
-          ctx.closePath()
-          ctx.fill()
-          // lens
-          ctx.fillStyle = '#9ca3af'
-          ctx.fillRect(20, 29, 6, 6)
-
-          map.addImage('cam-icon', ctx.getImageData(0, 0, size, size))
-
-          const pCanvas = document.createElement('canvas')
-          pCanvas.width = size
-          pCanvas.height = size
-
-          map.addSource('traffic-cams', {
-            type: 'geojson',
-            data: {
-              type: 'FeatureCollection',
-              features: CAMERAS.map(([lng, lat, name]) => ({
-                type: 'Feature',
-                properties: { name },
-                geometry: { type: 'Point', coordinates: [lng, lat] }
-              }))
-            }
-          })
-
-          map.addLayer({
-            id: 'traffic-cams',
-            type: 'symbol',
-            source: 'traffic-cams',
-            layout: {
-              'icon-image': 'cam-icon',
-              'icon-size': 0.5,
-              'icon-allow-overlap': true
-            }
-          })
-
-          // Police badge icon: blue circle with white star
-          const pCtx = pCanvas.getContext('2d')!
-          pCtx.beginPath()
-          pCtx.arc(32, 32, 30, 0, Math.PI * 2)
-          pCtx.fillStyle = '#1d4ed8'
-          pCtx.fill()
-          pCtx.strokeStyle = '#ffffff'
-          pCtx.lineWidth = 3
-          pCtx.stroke()
-          pCtx.fillStyle = '#ffffff'
-          pCtx.beginPath()
-          const cx = 32, cy = 32, spikes = 5, outer = 16, inner = 7
-          let rot = (-Math.PI / 2)
-          const step = Math.PI / spikes
-          pCtx.moveTo(cx, cy - outer)
-          for (let i = 0; i < spikes; i++) {
-            pCtx.lineTo(cx + Math.cos(rot) * outer, cy + Math.sin(rot) * outer)
-            rot += step
-            pCtx.lineTo(cx + Math.cos(rot) * inner, cy + Math.sin(rot) * inner)
-            rot += step
-          }
-          pCtx.closePath()
-          pCtx.fill()
-          map.addImage('police-icon', pCtx.getImageData(0, 0, size, size))
-
-          map.addSource('police-stations', {
-            type: 'geojson',
-            data: {
-              type: 'FeatureCollection',
-              features: POLICE.map(([lng, lat, name]) => ({
-                type: 'Feature',
-                properties: { name },
-                geometry: { type: 'Point', coordinates: [lng, lat] }
-              }))
-            }
-          })
-
-          map.addLayer({
-            id: 'police-stations',
-            type: 'symbol',
-            source: 'police-stations',
-            layout: {
-              'icon-image': 'police-icon',
-              'icon-size': 0.42,
-              'icon-allow-overlap': true
-            }
+          setupMapLayers(map)
+          // A mapStyle swap (battery saver dark mode) destroys every custom
+          // source/layer - re-add them each time a new style finishes loading,
+          // and re-draw the active route so the line survives too.
+          map.on('style.load', () => {
+            setupMapLayers(map)
+            const r = routeRef.current
+            if (r?.geometry && !map.getSource('route')) drawRoute(map, r)
           })
         }}
         onMove={(evt) => {
