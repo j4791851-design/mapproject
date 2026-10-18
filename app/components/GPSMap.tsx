@@ -57,6 +57,31 @@ const FIXED_WING_TYPES = new Set([
   'TBM7', 'TBM8', 'TBM9', 'SR22', 'SR20', 'C172', 'C182', 'PA28', 'PA31', 'PA46', 'P28A', 'P28R',
 ])
 
+// Rough outline of Canada's southern edge - used to keep the heli layer
+// Canadian-only even though the feed covers 1000km and spills into the US.
+// Ray-cast point-in-polygon; vertices are [lng, lat] tracing the border
+// (49th parallel -> Great Lakes -> St. Lawrence -> Atlantic provinces).
+const CANADA_OUTLINE: [number, number][] = [
+  [-141, 70], [-141, 49], [-95, 49], [-94.6, 48.6],
+  [-92, 48], [-89.5, 48], [-88, 47.7], [-85.5, 46.8], [-84, 46.4],
+  [-83.3, 45.8], [-83, 44], [-82.5, 43], [-82.7, 41.8], [-82.4, 41.9],
+  [-81.5, 42.05], [-80, 42.2], [-79.5, 43.25], [-79, 43.25], [-78, 43.45],
+  [-76.5, 43.7], [-75.5, 44.3], [-74.5, 44.9], [-73.5, 45], [-71.8, 45],
+  [-70, 45.1], [-68.5, 47.2], [-67.8, 47.1], [-67, 45.2], [-66, 44.5],
+  [-65.5, 43.4], [-64, 43.8], [-60.5, 45.7], [-59.5, 47.5], [-56, 50],
+  [-53, 47], [-52.5, 48], [-53, 55], [-55, 59], [-60, 60], [-64, 62],
+  [-70, 62.5], [-80, 69], [-95, 69], [-110, 69], [-125, 70],
+]
+const isCanada = (lng: number, lat: number) => {
+  let inside = false
+  for (let i = 0, j = CANADA_OUTLINE.length - 1; i < CANADA_OUTLINE.length; j = i++) {
+    const [xi, yi] = CANADA_OUTLINE[i]
+    const [xj, yj] = CANADA_OUTLINE[j]
+    if (yi > lat !== yj > lat && lng < ((xj - xi) * (lat - yi)) / (yj - yi) + xi) inside = !inside
+  }
+  return inside
+}
+
 const HELI_NAMES: Record<string, string> = {
   R22: 'Robinson R22', R44: 'Robinson R44', R66: 'Robinson R66',
   B06: 'Bell 206 JetRanger', B407: 'Bell 407', B412: 'Bell 412', B427: 'Bell 427', B429: 'Bell 429', B505: 'Bell 505',
@@ -425,7 +450,7 @@ export default function GPSMap() {
         if (FIXED_WING_TYPES.has(t)) return
         if (a.category !== 'A7' && !HELI_TYPES.has(t)) return
         const dKm = distMeters(loc.longitude, loc.latitude, a.lon, a.lat) / 1000
-        if (dKm > 1000) return
+        if (dKm > 1000 || !isCanada(a.lon, a.lat)) return
         seen.add(a.hex)
         out.push({
           hex: a.hex,
