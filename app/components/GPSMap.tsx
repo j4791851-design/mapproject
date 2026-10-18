@@ -95,7 +95,7 @@ export default function GPSMap() {
   const [helis, setHelis] = useState<any[]>([])
   const [selHeli, setSelHeli] = useState<any>(null)
   const [selPolice, setSelPolice] = useState<{ name: string; lng: number; lat: number } | null>(null)
-  const [wazePolice, setWazePolice] = useState<any[]>([])
+  const [batterySaver, setBatterySaver] = useState(false)
   const [speedKmh, setSpeedKmh] = useState<number>(0)
   const locRef = useRef(userLocation)
   const lastFixRef = useRef<{ lng: number; lat: number; t: number } | null>(null)
@@ -190,7 +190,7 @@ export default function GPSMap() {
   const navOn = Boolean(route)
   useEffect(() => {
     if (!navigator.geolocation) return
-    const geoOpts = navOn
+    const geoOpts = navOn && !batterySaver
       ? { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }
       : { enableHighAccuracy: false, maximumAge: 10000, timeout: 20000 }
     const watchId = navigator.geolocation.watchPosition(
@@ -283,7 +283,7 @@ export default function GPSMap() {
       )
 
     return () => navigator.geolocation.clearWatch(watchId)
-  }, [navOn])
+  }, [navOn, batterySaver])
 
   // Keep the screen awake the whole time the site is open. On iOS the Wake
   // Lock API is unreliable (all iOS browsers are WebKit), so NoSleep also
@@ -318,6 +318,11 @@ export default function GPSMap() {
   // Live helicopter tracking via airplanes.live ADS-B (free, no key, includes military/police).
   // Point endpoint caps at 250nm (~463km); the /mil feed covers military anywhere, filtered to 1000km.
   useEffect(() => {
+    if (batterySaver) {
+      setHelis([])
+      setSelHeli(null)
+      return
+    }
     let alive = true
     const load = async () => {
       if (document.hidden) return // battery: don't wake the radio while tab is backgrounded
@@ -371,40 +376,7 @@ export default function GPSMap() {
       clearInterval(iv)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- location read via ref so GPS ticks don't retrigger fetches
-  }, [])
-
-  // Live police sightings funneled from the Waze Live Map feed via our proxy.
-  // Fully optional: any failure returns [] and only this layer stays empty.
-  useEffect(() => {
-    let alive = true
-    const load = async () => {
-      if (document.hidden) return
-      const loc = locRef.current
-      if (!loc) return
-      try {
-        const r = await fetch(`/api/waze?lat=${loc.latitude.toFixed(3)}&lng=${loc.longitude.toFixed(3)}`)
-        if (!r.ok) return
-        const d = await r.json()
-        if (alive) setWazePolice(Array.isArray(d.alerts) ? d.alerts : [])
-      } catch {
-        /* layer quietly stays empty */
-      }
-    }
-    load()
-    const iv = setInterval(load, 120000)
-    return () => {
-      alive = false
-      clearInterval(iv)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- location read via ref so GPS ticks don't retrigger fetches
-  }, [])
-
-  const wazeLabel = (w: any) => {
-    const kind = w.type.includes('HIDING') ? 'Police reported (hidden)' : 'Police reported (visible)'
-    const age = w.ts ? Math.max(0, Math.round((Date.now() - w.ts) / 60000)) : null
-    const where = w.street || w.city || ''
-    return `${kind}${where ? ' · ' + where : ''}${age != null ? ` · ${age}m ago` : ''}`
-  }
+  }, [batterySaver])
 
   const saveCurrentRoute = async (name: string) => {
     if (!destination) return
@@ -896,7 +868,7 @@ export default function GPSMap() {
         interactiveLayerIds={['police-stations']}
         style={{ width: '100%', height: '100%' }}
         cursor={customMode && route ? 'crosshair' : 'grab'}
-        mapStyle="mapbox://styles/mapbox/streets-v12"
+        mapStyle={batterySaver ? 'mapbox://styles/mapbox/navigation-night-v1' : 'mapbox://styles/mapbox/streets-v12'}
         mapboxAccessToken={MAPBOX_TOKEN}
       >
         {/* User location marker is rendered imperatively (see ensureUserMarker) so it glides smoothly */}
@@ -951,22 +923,6 @@ export default function GPSMap() {
             </button>
           </Marker>
         ))}
-        {/* Waze-sourced live police sightings - red ring, tap for details */}
-        {wazePolice.map((w) => (
-          <Marker key={w.id} longitude={w.lng} latitude={w.lat} anchor="center">
-            <button
-              onClick={(e) => {
-                e.stopPropagation()
-                setSelPolice({ name: wazeLabel(w), lng: w.lng, lat: w.lat })
-              }}
-              className="w-8 h-8 rounded-full flex items-center justify-center text-base shadow-md bg-white border-2 border-red-500"
-              title={wazeLabel(w)}
-            >
-              🚔
-            </button>
-          </Marker>
-        ))}
-
         {/* Police station popup */}
         {selPolice && (
           <Popup
@@ -1075,6 +1031,12 @@ export default function GPSMap() {
             className={`px-3 py-1.5 rounded-full text-xs font-medium shadow transition-colors ${showHeliList ? 'bg-blue-600 text-white' : 'bg-white text-gray-700'}`}
           >
             🚁 Helis ({helis.length})
+          </button>
+          <button
+            onClick={() => setBatterySaver((b) => !b)}
+            className={`px-3 py-1.5 rounded-full text-xs font-medium shadow transition-colors ${batterySaver ? 'bg-green-600 text-white' : 'bg-white text-gray-700'}`}
+          >
+            🔋 Saver{batterySaver ? ' on' : ''}
           </button>
         </div>
 
