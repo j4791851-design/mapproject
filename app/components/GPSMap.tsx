@@ -1001,7 +1001,12 @@ export default function GPSMap() {
             return
           }
           // Custom route mode: tap the map to steer the route around cameras
-          if (customMode && route) addWaypoint(evt.lngLat.lng, evt.lngLat.lat)
+          if (customMode && route) {
+            addWaypoint(evt.lngLat.lng, evt.lngLat.lat)
+            return
+          }
+          // Tapped empty map (not a cam/station) - dismiss the popup
+          setSelPolice(null)
         }}
         interactiveLayerIds={['police-stations', 'traffic-cams']}
         style={{ width: '100%', height: '100%' }}
@@ -1068,7 +1073,7 @@ export default function GPSMap() {
             latitude={selPolice.lat}
             anchor="bottom"
             offset={18}
-            closeOnClick={true}
+            closeOnClick={false}
             onClose={() => setSelPolice(null)}
             className="text-black"
           >
