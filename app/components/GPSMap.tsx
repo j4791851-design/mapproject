@@ -43,6 +43,20 @@ const HELI_TYPES = new Set([
   'H269', 'H500', 'KMAX', 'MI8', 'MI24', 'MI38', 'KA26', 'KA32', 'KA52', 'NH90', 'TIGR', 'PUMA', 'LYNX', 'W3',
 ])
 
+// Common fixed-wing designators - the provider occasionally tags jets as A7
+// (rotorcraft), so these are never shown as helis even with a bad category.
+const FIXED_WING_TYPES = new Set([
+  'E190', 'E170', 'E175', 'C25A', 'C25B', 'C25C', 'C510', 'C525', 'C550', 'C560', 'C56X', 'C680', 'C700', 'C750',
+  'LJ24', 'LJ25', 'LJ31', 'LJ35', 'LJ40', 'LJ45', 'LJ55', 'LJ60', 'LJ75',
+  'GLF2', 'GLF3', 'GLF4', 'GLF5', 'GLF6', 'GLEX', 'GL5T', 'GL7T',
+  'CL30', 'CL35', 'CL60', 'CRJ1', 'CRJ2', 'CRJ7', 'CRJ9', 'CRJX',
+  'A319', 'A320', 'A321', 'A20N', 'A21N', 'B737', 'B738', 'B739', 'B38M', 'B39M',
+  'DH8A', 'DH8B', 'DH8C', 'DH8D', 'AT45', 'AT72', 'AT76',
+  'PC12', 'PC24', 'BE20', 'BE30', 'BE40', 'BE99', 'BE9L', 'BE9T', 'C208', 'C402', 'C404', 'C421',
+  'F2TH', 'F900', 'FA50', 'FA7X', 'FA8X', 'HA4T', 'H25A', 'H25B', 'H25C', 'SB05', 'PRM1', 'EA50',
+  'TBM7', 'TBM8', 'TBM9', 'SR22', 'SR20', 'C172', 'C182', 'PA28', 'PA31', 'PA46', 'P28A', 'P28R',
+])
+
 const HELI_NAMES: Record<string, string> = {
   R22: 'Robinson R22', R44: 'Robinson R44', R66: 'Robinson R66',
   B06: 'Bell 206 JetRanger', B407: 'Bell 407', B412: 'Bell 412', B427: 'Bell 427', B429: 'Bell 429', B505: 'Bell 505',
@@ -382,7 +396,7 @@ export default function GPSMap() {
       .catch(() => {})
   }, [])
 
-  // Live helicopter tracking via airplanes.live ADS-B (free, no key, includes military/police).
+  // Live helicopter tracking via adsb.lol ADS-B (free, no key, includes military/police).
   // Point endpoint caps at 250nm (~463km); the /mil feed covers military anywhere, filtered to 1000km.
   useEffect(() => {
     if (batterySaver) {
@@ -399,15 +413,16 @@ export default function GPSMap() {
       })()
       if (!loc) return
       const [point, mil] = await Promise.all([
-        fetch(`https://api.airplanes.live/v2/point/${loc.latitude.toFixed(4)}/${loc.longitude.toFixed(4)}/250`)
+        fetch(`https://api.adsb.lol/v2/point/${loc.latitude.toFixed(4)}/${loc.longitude.toFixed(4)}/250`)
           .then((r) => r.json()).catch(() => null),
-        fetch('https://api.airplanes.live/v2/mil').then((r) => r.json()).catch(() => null),
+        fetch('https://api.adsb.lol/v2/mil').then((r) => r.json()).catch(() => null),
       ])
       const seen = new Set<string>()
       const out: any[] = []
       const push = (a: any, isMil: boolean) => {
         if (!a?.hex || a.lat == null || a.lon == null || seen.has(a.hex)) return
         const t = (a.t || '').toUpperCase().trim()
+        if (FIXED_WING_TYPES.has(t)) return
         if (a.category !== 'A7' && !HELI_TYPES.has(t)) return
         const dKm = distMeters(loc.longitude, loc.latitude, a.lon, a.lat) / 1000
         if (dKm > 1000) return
