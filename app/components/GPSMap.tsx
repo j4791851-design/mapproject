@@ -90,12 +90,15 @@ const KNOWN_BRANDS = ['esso', 'petro-canada', 'petro canada', 'shell', 'canadian
 const gasKey = (lng: number, lat: number) => `${lng.toFixed(4)},${lat.toFixed(4)}`
 
 // 'pump'/'prepay' = community-verified; 'prepay-inferred' = known brand;
-// 'pump-inferred' = unnamed independent
-const classifyGas = (name: string, lng: number, lat: number, votes: Record<string, string>) => {
-  const v = votes[gasKey(lng, lat)]
-  if (v === 'pump' || v === 'prepay') return v
-  const n = name.toLowerCase()
-  return KNOWN_BRANDS.some((b) => n.includes(b)) ? 'prepay-inferred' : 'pump-inferred'
+// 'pump-inferred' = unnamed independent. A station keeps its inferred label
+// until 2+ votes agree otherwise - one stray vote can't flip it.
+const classifyGas = (name: string, lng: number, lat: number, counts: Record<string, { pump: number; prepay: number }>) => {
+  const inferred = KNOWN_BRANDS.some((b) => name.toLowerCase().includes(b)) ? 'prepay-inferred' : 'pump-inferred'
+  const c = counts[gasKey(lng, lat)]
+  if (!c) return inferred
+  if (c.prepay >= 2 && c.prepay > c.pump) return 'prepay'
+  if (c.pump >= 2 && c.pump > c.prepay) return 'pump'
+  return inferred
 }
 
 const gasLabel = (c: string) =>
@@ -159,7 +162,7 @@ export default function GPSMap() {
   const [showGas, setShowGas] = useState(false)
   const [selGas, setSelGas] = useState<{ name: string; lng: number; lat: number } | null>(null)
   const [gasFilter, setGasFilter] = useState<'all' | 'pump' | 'prepay'>('all')
-  const [gasVotes, setGasVotes] = useState<Record<string, 'pump' | 'prepay'>>({})
+  const [gasVotes, setGasVotes] = useState<Record<string, { pump: number; prepay: number }>>({})
   const [batterySaver, setBatterySaver] = useState(false)
   const [speedKmh, setSpeedKmh] = useState<number>(0)
   const locRef = useRef(userLocation)
@@ -174,7 +177,7 @@ export default function GPSMap() {
   const prefsRef = useRef({ tolls: false, highways: false, cams: false })
   const routeSetAtRef = useRef(0)
   const gasRef = useRef(false)
-  const gasVotesRef = useRef<Record<string, 'pump' | 'prepay'>>({})
+  const gasVotesRef = useRef<Record<string, { pump: number; prepay: number }>>({})
   const gasFilterRef = useRef<'all' | 'pump' | 'prepay'>('all')
   const offRouteSinceRef = useRef<number | null>(null)
   const lastRerouteRef = useRef(0)
@@ -1244,24 +1247,30 @@ export default function GPSMap() {
                 Route here
               </button>
               <div className="flex gap-1.5 mt-1.5">
-                {(['pump', 'prepay'] as const).map((kind) => (
-                  <button
-                    key={kind}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      const key = gasKey(selGas.lng, selGas.lat)
-                      fetch('/api/gasvote', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ key, kind }),
-                      }).catch(() => {})
-                      setGasVotes((v) => ({ ...v, [key]: kind }))
-                    }}
-                    className="flex-1 text-[10px] font-medium border border-gray-300 rounded-full px-1 py-1 text-gray-600 hover:bg-gray-100"
-                  >
-                    {kind === 'pump' ? 'Pump before pay' : 'Prepay'}
-                  </button>
-                ))}
+                {(['pump', 'prepay'] as const).map((kind) => {
+                  const counts = gasVotes[gasKey(selGas.lng, selGas.lat)]
+                  return (
+                    <button
+                      key={kind}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        const key = gasKey(selGas.lng, selGas.lat)
+                        fetch('/api/gasvote', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ key, kind }),
+                        }).catch(() => {})
+                        setGasVotes((v) => {
+                          const c = v[key] ?? { pump: 0, prepay: 0 }
+                          return { ...v, [key]: { ...c, [kind]: c[kind] + 1 } }
+                        })
+                      }}
+                      className="flex-1 text-[10px] font-medium border border-gray-300 rounded-full px-1 py-1 text-gray-600 hover:bg-gray-100"
+                    >
+                      {kind === 'pump' ? 'Pump before pay' : 'Prepay'} ({counts?.[kind] ?? 0})
+                    </button>
+                  )
+                })}
               </div>
             </div>
           </Popup>

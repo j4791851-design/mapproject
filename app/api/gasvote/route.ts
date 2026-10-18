@@ -29,18 +29,28 @@ export async function GET() {
       SELECT station_key, kind, count(*) AS n
       FROM gas_votes GROUP BY station_key, kind
     `
-    const acc: Record<string, { pump: number; prepay: number }> = {}
+    const votes: Record<string, { pump: number; prepay: number }> = {}
     for (const r of rows) {
-      const a = (acc[r.station_key] ??= { pump: 0, prepay: 0 })
+      const a = (votes[r.station_key] ??= { pump: 0, prepay: 0 })
       a[r.kind as 'pump' | 'prepay'] = Number(r.n)
-    }
-    const votes: Record<string, string> = {}
-    for (const [k, v] of Object.entries(acc)) {
-      if (v.pump !== v.prepay) votes[k] = v.pump > v.prepay ? 'pump' : 'prepay'
     }
     return NextResponse.json({ votes })
   } catch {
     return NextResponse.json({ votes: {} })
+  }
+}
+
+// Clear the caller's own votes - stations fall back to their default labels
+export async function DELETE(req: Request) {
+  try {
+    const userId = sessionFromRequest(req)
+    if (!userId) return NextResponse.json({ error: 'not logged in' }, { status: 401 })
+    if (!sql) return NextResponse.json({ error: 'db not configured' }, { status: 500 })
+    await ensureTable()
+    await sql`DELETE FROM gas_votes WHERE user_id = ${userId}`
+    return NextResponse.json({ ok: true })
+  } catch {
+    return NextResponse.json({ error: 'failed' }, { status: 500 })
   }
 }
 
