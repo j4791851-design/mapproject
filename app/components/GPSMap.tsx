@@ -373,11 +373,14 @@ export default function GPSMap() {
           // smartest rejoin (almost never demands a U-turn), remaining waypoints
           // carry over, and the camera-avoid iteration still runs when '0 cams'
           // is on. Guarded by an accuracy check, a grace period after each route
-          // set, and a 15s cooldown so it can't flail.
+          // set, and a 15s cooldown so it can't flail. Skipped entirely for
+          // custom routes — the user drew that path on purpose, so passing a
+          // turn shouldn't trigger a redirect.
           const curRoute = routeRef.current
           const curDest = destRef.current
           if (
             curRoute?.geometry?.coordinates && curDest &&
+            wpsRef.current.length === 0 &&
             now - routeSetAtRef.current > 8000 &&
             (position.coords.accuracy == null || position.coords.accuracy < 45)
           ) {
@@ -1401,7 +1404,7 @@ export default function GPSMap() {
         {/* Gas payment filter chips */}
         {showGas && (
           <div className="mt-1.5 flex gap-1.5">
-            {([['all', 'All'], ['pump', 'Pump first'], ['potential', 'Potential'], ['prepay', 'Prepay only']] as const).map(([k, label]) => (
+            {([['all', 'All'], ['pump', 'Pump first'], ['potential', 'Potential pump first'], ['prepay', 'Prepay only']] as const).map(([k, label]) => (
               <button
                 key={k}
                 onClick={() => setGasFilter(k)}
